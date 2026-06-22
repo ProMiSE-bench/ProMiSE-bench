@@ -123,7 +123,7 @@ def load_survived_clusters(survived_clusters_json):
 def create_bias_lookup(bias_data):
     """Create lookup dict for bias data.
     
-    Extracts: ratio_difference, entry1_hits, entry2_hits
+    Extracts: bias_ratio_diff, entry1_hits, entry2_hits
     """
     lookup = {}
     
@@ -141,7 +141,7 @@ def create_bias_lookup(bias_data):
                 lookup[model][key] = {
                     'entry1_hits': entry['entry1_hits'],
                     'entry2_hits': entry['entry2_hits'],
-                    'ratio_diff': entry['ratio_difference'],
+                    'ratio_diff': entry['bias_ratio_diff'],
                     '_reversed': False
                 }
                 
@@ -149,7 +149,7 @@ def create_bias_lookup(bias_data):
                 lookup[model][key_rev] = {
                     'entry1_hits': entry['entry2_hits'],
                     'entry2_hits': entry['entry1_hits'],
-                    'ratio_diff': -entry['ratio_difference'],
+                    'ratio_diff': -entry['bias_ratio_diff'],
                     '_reversed': True
                 }
     

@@ -13,7 +13,6 @@ from utils._config import eval_cfg as E
 
 BETA_CHAIN = 0.5
 BETA_INTERFACE = 1.0
-SMOOTHING_CONSTANT = 0.0
 
 CATEGORIES = (
     ("intrinsic", "intrinsic.csv"),
@@ -154,8 +153,8 @@ def sum_conf_label_hits(
     return total
 
 
-def calculate_smoothed_bias(hits1: float, hits2: float) -> float:
-    total = hits1 + hits2 + SMOOTHING_CONSTANT
+def calculate_bias_ratio_diff(hits1: float, hits2: float) -> float:
+    total = hits1 + hits2
     if total == 0:
         return 0.0
     return (hits2 - hits1) / total
@@ -175,8 +174,6 @@ def calculate_bias_scores(
     memorization_dir = memorization_base_dir / model_name / category
 
     results: list[dict] = []
-    total_pairs = sum(len(pairs) for pairs in valid_pairs_dict.values())
-    processed = 0
 
     for cluster_name, pair_list in valid_pairs_dict.items():
         cluster_dir = memorization_dir / cluster_name
@@ -201,14 +198,13 @@ def calculate_bias_scores(
 
             hits1 = sum_conf_label_hits(cluster_dir, conf1, chain_weights, interface_weights)
             hits2 = sum_conf_label_hits(cluster_dir, conf2, chain_weights, interface_weights)
-            smoothed_bias = calculate_smoothed_bias(hits1, hits2)
+            bias_ratio_diff = calculate_bias_ratio_diff(hits1, hits2)
             total_hits = hits1 + hits2
             if total_hits == 0:
-                ratio1 = ratio2 = ratio_diff = 0.0
+                ratio1 = ratio2 = 0.0
             else:
                 ratio1 = hits1 / total_hits
                 ratio2 = hits2 / total_hits
-                ratio_diff = ratio2 - ratio1
 
             results.append(
                 {
@@ -227,14 +223,9 @@ def calculate_bias_scores(
                     "entry2_ratio": round(ratio2, 4),
                     "total_hits": total_hits,
                     "hits_eff": total_hits,
-                    "ratio_difference": round(ratio_diff, 4),
-                    "smoothed_bias": round(smoothed_bias, 4),
-                    "train_bias_score": round(smoothed_bias, 4),
+                    "bias_ratio_diff": round(bias_ratio_diff, 4),
                 }
             )
-            processed += 1
-            if processed % 100 == 0:
-                click.echo(f"Processed {processed}/{total_pairs} pairs...")
 
     return results
 
@@ -306,22 +297,18 @@ def main(
     chain_weights, interface_weights = load_cluster_weights(weights_json)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    click.echo(
-        f"Using chain beta={BETA_CHAIN}, interface beta={BETA_INTERFACE}, "
-        f"smoothing constant={SMOOTHING_CONSTANT}"
-    )
+    click.echo(f"Using chain beta={BETA_CHAIN}, interface beta={BETA_INTERFACE}")
 
     for model in selected_models:
-        click.echo(f"\nModel: {model}")
+        click.echo(f"Model: {model}")
         model_results: dict[str, list[dict]] = {}
 
         for category, csv_filename in CATEGORIES:
             csv_path = combinations_dir / csv_filename
             if not csv_path.exists():
-                click.echo(f"  Warning: CSV file not found: {csv_path}")
+                click.echo(f"Warning: CSV file not found: {csv_path}")
                 continue
 
-            click.echo(f"  Category: {category}")
             results = calculate_bias_scores(
                 valid_pairs_json,
                 csv_path,
@@ -332,20 +319,19 @@ def main(
                 interface_weights,
             )
             model_results[category] = results
-            click.echo(f"    Total pairs processed: {len(results)}")
 
             if results:
-                avg_bias = sum(row["smoothed_bias"] for row in results) / len(results)
+                avg_bias = sum(row["bias_ratio_diff"] for row in results) / len(results)
                 no_hits = sum(1 for row in results if row["total_hits"] == 0)
                 click.echo(
-                    f"    Smoothed bias: avg={avg_bias:.4f}, "
+                    f"  {category}: pairs={len(results)}, avg bias_ratio_diff={avg_bias:.4f}, "
                     f"pairs with no hits: {no_hits} ({no_hits / len(results) * 100:.1f}%)"
                 )
 
         output_path = output_dir / f"training_bias_per_pair_{model}.json"
         with output_path.open("w") as handle:
             json.dump(model_results, handle, indent=2)
-        click.echo(f"  Saved to: {output_path}")
+        click.echo(f"Saved to: {output_path}")
 
 
 if __name__ == "__main__":

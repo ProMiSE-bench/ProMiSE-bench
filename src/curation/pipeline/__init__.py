@@ -191,8 +191,11 @@ STEPS: list[Step] = [
         "select_representative",
         "curation.pipeline.select_representative",
         args_fn=lambda s, m, w, d, t: [
-            "--dataset-dir",
-            _d(d, t, C.dirname("combinations")),
+            arg
+            for csv in sorted(Path(_d(d, t, C.dirname("combinations"))).glob("*.csv"))
+            for arg in ("--dataset-csv", str(csv))
+        ]
+        + [
             "--out-dataset",
             _d(d, t, C.dirname("combinations_filtered")),
         ],
