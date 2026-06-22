@@ -11,10 +11,11 @@ Examples:
 """
 
 import os
-import sys
 import json
 from datetime import datetime
 from collections import defaultdict
+
+import click
 
 from utils._config import eval_cfg as E
 
@@ -34,7 +35,7 @@ CUTOFFS = {
 
 # CSV categories
 CSV_CATEGORIES = [
-    "apo-monomers",
+    "intrinsic",
     "ligand-induced",
     "protein-induced",
 ]
@@ -54,7 +55,7 @@ def get_pdb_date(pdb_id):
                 data = json.load(f)
                 return data.get("revision_date")
         except Exception as e:
-            print(f"Warning: Failed to read {json_path}: {e}")
+            click.echo(f"Warning: Failed to read {json_path}: {e}")
             return None
     return None
 
@@ -139,18 +140,14 @@ def load_hits(hits_file, threshold_type, threshold_value, cutoff_date):
     # Determine column index for threshold (0-indexed)
     # foldseek TSV: query, target, evalue, bits, alnlen, qcov, tcov, tmscore, fident
     #               0      1       2       3     4       5     6     7        8
-    threshold_col = None
     if threshold_type == "tm":
         threshold_col = 7  # TM score column
     elif threshold_type == "fident":
         threshold_col = 8  # fident column
     else:
-        print(f"Error: Unknown threshold type '{threshold_type}'")
-        sys.exit(1)
+        raise ValueError(f"Unknown threshold type '{threshold_type}'")
     
     cutoff_dt = parse_date(cutoff_date)
-    
-    print(f"Loading hits from {hits_file}...")
     line_count = 0
     filtered_count = 0
     
@@ -191,11 +188,7 @@ def load_hits(hits_file, threshold_type, threshold_value, cutoff_date):
             hits_by_query[query].append(line.strip())
             filtered_count += 1
     
-    print(f"  Total lines: {line_count}")
-    print(f"  Filtered hits: {filtered_count}")
-    print(f"  Unique queries: {len(hits_by_query)}")
-    
-    return hits_by_query
+    return hits_by_query, line_count, filtered_count
 
 
 def sanitize_cluster_name(cluster):
@@ -238,33 +231,27 @@ def collect_hits(category, conf_clusters, hits_by_query, output_base):
             total_hits += len(all_hits)
             total_clusters += 1
     
-    print(f"  {category}: {total_clusters} clusters with hits, {total_hits} total hits")
+    return total_clusters, total_hits
 
 
-def main():
-    if len(sys.argv) != 5:
-        print("Usage: python collect_memorization_hits.py <hits_file> <threshold_type> <threshold_value> <model>")
-        print("Examples:")
-        print("  python collect_memorization_hits.py hits_foldseek.tsv tm 0.7 boltz_2")
-        print("  python collect_memorization_hits.py hits_foldseek.tsv tm 0.8 af3")
-        sys.exit(1)
-    
-    hits_filename = sys.argv[1]
-    threshold_type = sys.argv[2]
-    threshold_value = float(sys.argv[3])
-    model = sys.argv[4]
-    
-    # Validate model
-    if model not in CUTOFFS:
-        print(f"Error: Unknown model '{model}'. Available: {list(CUTOFFS.keys())}")
-        sys.exit(1)
-    
+@click.command()
+@click.argument("hits_filename")
+@click.argument("threshold_type", type=click.Choice(("tm", "fident")))
+@click.argument("threshold_value", type=float)
+@click.argument("model", type=click.Choice(tuple(CUTOFFS), case_sensitive=False))
+def main(
+    hits_filename: str,
+    threshold_type: str,
+    threshold_value: float,
+    model: str,
+) -> None:
+    """Collect Foldseek memorization hits grouped by conformational clusters."""
+    model = model.lower()
     cutoff_date = CUTOFFS[model]
     hits_file = os.path.join(HITS_DIR, hits_filename)
     
     if not os.path.exists(hits_file):
-        print(f"Error: Hits file not found: {hits_file}")
-        sys.exit(1)
+        raise click.ClickException(f"Hits file not found: {hits_file}")
     
     # Create output directory structure
     output_base = os.path.join(
@@ -273,37 +260,46 @@ def main():
         model
     )
     
-    print(f"\n{'='*70}")
-    print(f"Collecting memorization hits")
-    print(f"{'='*70}")
-    print(f"Hits file: {hits_file}")
-    print(f"Threshold: {threshold_type} >= {threshold_value}")
-    print(f"Model: {model}")
-    print(f"Cutoff date: {cutoff_date}")
-    print(f"Output: {output_base}")
-    print(f"{'='*70}\n")
-    
     # Load all hits with filtering
-    hits_by_query = load_hits(hits_file, threshold_type, threshold_value, cutoff_date)
+    hits_by_query, line_count, filtered_count = load_hits(
+        hits_file,
+        threshold_type,
+        threshold_value,
+        cutoff_date,
+    )
+    click.echo(
+        f"Loaded {filtered_count}/{line_count} Foldseek hits "
+        f"for {len(hits_by_query)} queries."
+    )
     
     # Process each CSV category
+    total_clusters = 0
+    total_hits = 0
     for category in CSV_CATEGORIES:
         csv_file = os.path.join(CSV_DIR, f"{category}.csv")
         
         if not os.path.exists(csv_file):
-            print(f"Warning: CSV file not found: {csv_file}")
+            click.echo(f"Warning: CSV file not found: {csv_file}")
             continue
         
-        print(f"\nProcessing {category}...")
         conf_clusters = load_conf_clusters(csv_file)
-        print(f"  Found {len(conf_clusters)} conformational clusters")
-        
-        collect_hits(category, conf_clusters, hits_by_query, output_base)
-    
-    print(f"\n{'='*70}")
-    print(f"Done! Results written to:")
-    print(f"{output_base}")
-    print(f"{'='*70}")
+        category_clusters, category_hits = collect_hits(
+            category,
+            conf_clusters,
+            hits_by_query,
+            output_base,
+        )
+        total_clusters += category_clusters
+        total_hits += category_hits
+        click.echo(
+            f"{category}: clusters with hits={category_clusters}/{len(conf_clusters)}, "
+            f"hits={category_hits}"
+        )
+
+    click.echo(
+        f"Saved to: {output_base} "
+        f"(clusters with hits={total_clusters}, hits={total_hits})"
+    )
 
 
 if __name__ == "__main__":
