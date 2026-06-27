@@ -8,7 +8,7 @@ and uses promise-bench's ``valid_pairs.json`` schema (list-of-lists).
 Success criteria (TM_THRESHOLD = 0.8)
 -------------------------------------
 
-**Intrinsic (apo-monomers)** -- cluster-level success
+**Intrinsic** -- cluster-level success
     Each sample (prediction CIF) is aligned to every cluster reference.
     Per sample, ``best_tm[conf]`` is the max TM over references in ``conf``.
     Sample *covers* ``conf_X`` iff
@@ -65,8 +65,6 @@ from ._common import (
     METHODS,
     SET_TYPES,
     TM_THRESHOLD,
-    normalize_method,
-    normalize_set_type,
 )
 from .align_loader import (
     Row,
@@ -389,9 +387,7 @@ def compute_pair_results(
     ``valid_pairs_path`` -- promise-bench ``valid_pairs.json``.
     ``cluster_filter`` / ``method_filter`` -- optional subset (for testing).
     """
-    methods = (
-        [normalize_method(m) for m in method_filter] if method_filter else list(METHODS)
-    )
+    methods = list(method_filter) if method_filter else list(METHODS)
 
     print(f"[1/3] Loading align rows from {align_dir}", flush=True)
     rows = load_align_rows(
@@ -406,9 +402,7 @@ def compute_pair_results(
     print(f"[2/3] Loading valid_pairs from {valid_pairs_path}", flush=True)
     with open(valid_pairs_path) as fh:
         valid_pairs_raw = json.load(fh)
-    valid_pairs: Dict[str, Dict[str, List[List[str]]]] = {}
-    for raw_set, cmap in valid_pairs_raw.items():
-        valid_pairs[normalize_set_type(raw_set)] = cmap
+    valid_pairs: Dict[str, Dict[str, List[List[str]]]] = dict(valid_pairs_raw)
 
     all_results: Dict[str, Any] = {
         st: {} for st in SET_TYPES

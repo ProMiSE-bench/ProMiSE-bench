@@ -5,7 +5,7 @@ Check progress of distogram calculation tasks.
 The output file written by ``calc_distogram_loss`` is
 ``distogram_loss_final.json`` (next to the prediction distograms), e.g.:
 
-    distogram/af3/apo-monomers/8ABP_1/2wrz_2_B1_m/distogram_loss_final.json
+    distogram/af3/intrinsic/8ABP_1/2wrz_2_B1_m/distogram_loss_final.json
 
 Usage (``PYTHONPATH=src``)::
 
@@ -94,8 +94,7 @@ def get_expected_dynamic_pairs(
                 if (ref_A, ref_B) not in valid_pair_edges:
                     continue
                 
-                # Apply filtering logic for non-apo-monomers
-                if method_type_from_path != 'apo-monomers':
+                if method_type_from_path != 'intrinsic':
                     # For each reference in the task, check if pair should be included
                     should_include = False
                     for reference_yaml_tag in reference_yaml_tags:

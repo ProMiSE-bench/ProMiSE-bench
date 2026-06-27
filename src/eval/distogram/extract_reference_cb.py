@@ -863,7 +863,7 @@ def create_symlinks(source_method: str, base_dir: Path):
     main extraction flow in this repo). Keep only if you have those files from
     older runs and want to mirror them across methods.
     """
-    other_methods = ["af3", "chai-1", "bioemu"]
+    other_methods = ["af3", "chai", "bioemu"]
     source_base = base_dir / source_method
 
     if not source_base.exists():

@@ -159,8 +159,8 @@ Pre-computed preference scores (`data/preference_scores.json`) for each predicti
 {model} → {category} → {cluster_id} → {pair_id} → {scores}
 ```
 
-- **Models**: `alphafold3`, `boltz1`, `boltz2`, `chai`, `bioemu`
-- **Categories**: `intrinsic-dynamics`, `ligand-induced`, `protein-induced`
+- **Models**: `af3`, `boltz1`, `boltz2`, `chai`, `bioemu`
+- **Categories**: `intrinsic`, `ligand-induced`, `protein-induced`
 - **Cluster ID**: Sequence cluster identifier (e.g., `8ABP_1`)
 - **Pair ID**: Conformational pair identifier in format `{pdb1}_{asm1}_{chain1}-{pdb2}_{asm2}_{chain2}`
   - Example: `2wrz_2_B1-2wrz_1_A1` represents conformer 1 (PDB: 2wrz, assembly: 2, chain: B1) vs conformer 2 (PDB: 2wrz, assembly: 1, chain: A1) 

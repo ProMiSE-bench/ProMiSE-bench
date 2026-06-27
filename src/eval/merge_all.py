@@ -16,7 +16,7 @@ Outputs (written to --output-dir):
   merged_valid_pairs_data.csv
       Flat table with columns: model, set_name, cluster_id, conf1_name, conf2_name,
       msa_pref_sum, msa_pref_avg, same_sign_sum_avg, over_coverage_0.1,
-      rmsd_conf1_conf2, confbench_mean (apo-monomers) /
+      rmsd_conf1_conf2, confbench_mean (intrinsic) /
       confbench_apo_pred & confbench_holo_pred (induced sets),
       distogram_confbench*, distogram_dynamic_confbench*,
       bias_entry1_hits, bias_entry2_hits, bias_ratio_diff,
@@ -33,19 +33,12 @@ from collections import defaultdict
 from utils._config import eval_cfg as E
 
 
-# Model mapping
-MODELS = ['alphafold3', 'boltz1', 'boltz2', 'chai', 'bioemu']
-MODEL_KEY_MAP = {
-    'alphafold3': 'af3',
-    'boltz1': 'boltz1',
-    'boltz2': 'boltz2',
-    'chai': 'chai',
-    'bioemu': 'bioemu'
-}
+MODELS = ["af3", "boltz1", "boltz2", "chai", "bioemu"]
+SET_NAMES = ["intrinsic", "ligand-induced", "protein-induced"]
 
 # Bias file mapping (boltz1 uses af3 bias)
 BIAS_FILE_MAP = {
-    'alphafold3': 'training_bias_per_pair_af3.json',
+    'af3': 'training_bias_per_pair_af3.json',
     'boltz1': 'training_bias_per_pair_af3.json',  # boltz1 = af3
     'boltz2': 'training_bias_per_pair_boltz_2.json',
     'chai': 'training_bias_per_pair_chai_1.json',
@@ -54,7 +47,7 @@ BIAS_FILE_MAP = {
 
 # Survived clusters model key mapping
 SURVIVED_MODEL_MAP = {
-    'alphafold3': 'af3',
+    'af3': 'af3',
     'boltz1': 'boltz1',
     'boltz2': 'boltz2',
     'chai': 'chai',
@@ -75,10 +68,11 @@ def load_msa_pref(msa_pref_csv):
     # Create lookup dict: (set_name, cluster_id, conf1, conf2) -> row
     msa_lookup = {}
     for _, row in df.iterrows():
-        key = (row['set_name'], row['cluster_id'], row['conf1_name'], row['conf2_name'])
+        set_name = row['set_name']
+        key = (set_name, row['cluster_id'], row['conf1_name'], row['conf2_name'])
         msa_lookup[key] = row.to_dict()
         # Also store reverse order for matching
-        key_rev = (row['set_name'], row['cluster_id'], row['conf2_name'], row['conf1_name'])
+        key_rev = (set_name, row['cluster_id'], row['conf2_name'], row['conf1_name'])
         msa_lookup[key_rev] = {'_reversed': True, **row.to_dict()}
     
     return msa_lookup
@@ -175,9 +169,8 @@ def create_survived_lookup(survived_data):
     return lookup
 
 
-def get_confbench_data(confbench, set_name, cluster_id, conf1, conf2, model_key):
+def get_confbench_data(confbench, set_name, cluster_id, conf1, conf2, model):
     """Get ConfBench data for a pair."""
-    # Try to find the pair key in confbench
     pair_key_options = [
         f"{cluster_id}_{conf1}_{conf2}",
         f"{cluster_id}_{conf2}_{conf1}"
@@ -192,15 +185,14 @@ def get_confbench_data(confbench, set_name, cluster_id, conf1, conf2, model_key)
     if entry is None:
         return None
     
-    models = entry.get('models', {})
-    model_data = models.get(model_key, {})
+    model_data = entry.get('models', {}).get(model, {})
     
     result = {
         'rmsd_conf1_conf2': entry.get('rmsd_ref1_ref2') or entry.get('rmsd_apo_holo_ref')
     }
     
-    if set_name == 'apo-monomers':
-        # apo-monomers: single mean_confbench_score
+    if set_name == 'intrinsic':
+        # intrinsic: single mean_confbench_score
         if 'predictions' in model_data:
             preds = model_data['predictions']
             if preds:
@@ -218,18 +210,16 @@ def get_confbench_data(confbench, set_name, cluster_id, conf1, conf2, model_key)
     return result
 
 
-def get_confbench_distogram_data(confbench_distogram, set_name, cluster_id, conf1, conf2, model_key):
+def get_confbench_distogram_data(confbench_distogram, set_name, cluster_id, conf1, conf2, model):
     """Get Distogram-based ConfBench data for a pair.
     
     Returns dict with:
-    - For apo-monomers: distogram_confbench, distogram_dynamic_confbench
+    - For intrinsic: distogram_confbench, distogram_dynamic_confbench
     - For induced sets: distogram_confbench_apo, distogram_confbench_holo,
                         distogram_dynamic_confbench_apo, distogram_dynamic_confbench_holo
     
     Also returns '_found_key' to indicate which key was found (for debugging order issues).
     """
-    # Try to find the pair key in confbench_distogram
-    # Format in distogram file: "{cluster_id}_{conf1}_{conf2}"
     pair_key_options = [
         f"{cluster_id}_{conf1}_{conf2}",
         f"{cluster_id}_{conf2}_{conf1}"
@@ -246,13 +236,12 @@ def get_confbench_distogram_data(confbench_distogram, set_name, cluster_id, conf
     if entry is None:
         return None, None
     
-    models = entry.get('models', {})
-    model_data = models.get(model_key, {})
+    model_data = entry.get('models', {}).get(model, {})
     
     result = {}
     
-    if set_name == 'apo-monomers':
-        # apo-monomers: single mean_confbench_score, mean_dynamic_confbench_score
+    if set_name == 'intrinsic':
+        # intrinsic: single mean_confbench_score, mean_dynamic_confbench_score
         result['distogram_confbench'] = model_data.get('mean_confbench_score')
         result['distogram_dynamic_confbench'] = model_data.get('mean_dynamic_confbench_score')
     else:
@@ -303,7 +292,7 @@ def merge_all_data(valid_pairs_json, confbench_json, confbench_distogram_json,
     distogram_order_swapped = defaultdict(int)  # Track when pair order was swapped
     distogram_details = []  # Store detailed missing info
     
-    for set_name in ['apo-monomers', 'ligand-induced', 'protein-induced']:
+    for set_name in SET_NAMES:
         for model in MODELS:
             if set_name not in json_output[model]:
                 json_output[model][set_name] = {}
@@ -334,8 +323,6 @@ def merge_all_data(valid_pairs_json, confbench_json, confbench_distogram_json,
                 
                 # Process for each model
                 for model in MODELS:
-                    model_key = MODEL_KEY_MAP[model]
-                    
                     # Initialize cluster dict if needed
                     if cluster_id not in json_output[model][set_name]:
                         json_output[model][set_name][cluster_id] = {}
@@ -349,11 +336,11 @@ def merge_all_data(valid_pairs_json, confbench_json, confbench_distogram_json,
                     }
                     
                     # ConfBench data (RMSD-based)
-                    cb_data = get_confbench_data(confbench, set_name, cluster_id, conf1, conf2, model_key)
+                    cb_data = get_confbench_data(confbench, set_name, cluster_id, conf1, conf2, model)
                     if cb_data:
                         pair_data.update(cb_data)
                         # Check if actual scores are missing (None values)
-                        if set_name == 'apo-monomers':
+                        if set_name == 'intrinsic':
                             if cb_data.get('confbench_mean') is None:
                                 missing_confbench[model] += 1
                         else:
@@ -364,7 +351,7 @@ def merge_all_data(valid_pairs_json, confbench_json, confbench_distogram_json,
                     
                     # NEW: Distogram-based ConfBench data
                     dg_data, found_key = get_confbench_distogram_data(
-                        confbench_distogram, set_name, cluster_id, conf1, conf2, model_key
+                        confbench_distogram, set_name, cluster_id, conf1, conf2, model
                     )
                     
                     if dg_data:
@@ -376,7 +363,7 @@ def merge_all_data(valid_pairs_json, confbench_json, confbench_distogram_json,
                             distogram_order_swapped[model] += 1
                         
                         # Check if specific values are missing
-                        if set_name == 'apo-monomers':
+                        if set_name == 'intrinsic':
                             if dg_data.get('distogram_confbench') is None:
                                 missing_distogram_confbench[model] += 1
                             if dg_data.get('distogram_dynamic_confbench') is None:

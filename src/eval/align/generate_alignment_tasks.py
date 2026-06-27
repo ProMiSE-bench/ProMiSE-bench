@@ -94,7 +94,7 @@ def extract_file_info(file_path: Path, method: str, yaml_tag: str) -> Dict[str, 
     seed = None
     sample = None
 
-    if method in ("boltz2", "boltz1", "boltz-2", "boltz-1"):
+    if method in ("boltz2", "boltz1"):
         for part in file_path.parts:
             if part.startswith("seed_"):
                 seed = part.split("_")[1] if "_" in part else part
@@ -112,7 +112,7 @@ def extract_file_info(file_path: Path, method: str, yaml_tag: str) -> Dict[str, 
             elif "seed-" in part and "sample-" in part:
                 seed = part.split("_")[0].split("-")[1]
                 sample = part.split("_")[1].split("-")[1]
-    elif method in ("chai", "chai-1"):
+    elif method == "chai":
         for part in file_path.parts:
             if part.startswith("seed_"):
                 seed = part.split("_")[1] if "_" in part else part

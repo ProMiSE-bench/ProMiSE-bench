@@ -38,7 +38,7 @@ import pandas as pd
 from utils._config import eval_cfg as E
 
 
-MODELS = ["af3", "boltz-1", "boltz-2", "chai-1", "bioemu"]
+MODELS = ["af3", "boltz1", "boltz2", "chai", "bioemu"]
 
 
 def parse_tag_to_base(tag: str) -> str:
@@ -684,7 +684,7 @@ def main() -> None:
         "--models",
         type=str,
         default=",".join(MODELS),
-        help="Comma-separated model keys to include (default: af3,boltz-1,boltz-2,chai-1,bioemu)",
+        help="Comma-separated model keys to include (default: af3,boltz1,boltz2,chai,bioemu)",
     )
     args = p.parse_args()
 

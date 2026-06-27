@@ -57,7 +57,7 @@ pipeline:
     representative_sequences: representative_sequences.json
     binding_site_compatibility: binding_site_compatibility.csv
     excluded_ccd_codes: excluded_ccd_codes.txt
-    rep_seq: rep_seq.json
+    rep_seq: representative_sequences.json
     answer_map: dataset/seq_cluster_to_answer_map.json
     ligand_clusters: /home.galaxy4/seeun/works/projects/casp-pipe/data/cluster-lig_ccd/cutoff_0.4.json
   # make_pairs enrichment: MSA/chain/distogram paths. Use absolute paths
@@ -98,14 +98,15 @@ eval:
 
     # output
     output: output
+    align_results: output/align_results
 
     # plot
     plots: plots
     filtered_pairs: filtered_pairs_msa_bias
 
   files:
-    # core inputs
-    valid_pairs: valid_pairs.json
+    # core inputs (paths relative to eval.data_root unless absolute)
+    valid_pairs: ../data/dataset/valid_pairs.json
     survived_clusters: survived_clusters_threshold60.json
 
     # confbench scores

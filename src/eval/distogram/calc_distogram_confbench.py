@@ -8,7 +8,7 @@ ProMiSE-bench paths/config and distogram artefact layout.
 
 Inputs
 ------
-- ``valid_pairs.json``: by set type (apo-monomers / ligand-induced / protein-induced).
+- ``valid_pairs.json``: by set type (intrinsic / ligand-induced / protein-induced).
 - ``distogram_tasks.json``: produced by ``collect_distograms`` (and used by loss/diff steps).
 - ``reference_distogram_diff.json`` tree: produced by ``calc_reference_distogram_diff``.
 - Per-prediction distogram loss JSON: ``distogram_loss_final.json`` written next to
@@ -95,13 +95,6 @@ def try_load_dist_diff(
             return float(dist), (float(dynamic_dist) if dynamic_dist is not None else None)
     return None
 
-
-def get_pair_type_from_path(path: Path) -> Optional[str]:
-    parts = path.parts
-    for method_type in ["apo-monomers", "ligand-induced", "protein-induced"]:
-        if method_type in parts:
-            return method_type
-    return None
 
 
 def distogram_loss_path_from_task(task: Dict[str, Any]) -> Optional[Path]:
@@ -259,9 +252,6 @@ def _task_index(tasks: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str, str], 
     return idx
 
 
-_METHOD_TASK_ALIAS = {"boltz1": "boltz-1", "boltz2": "boltz-2"}
-
-
 def _find_task(
     idx: Dict[Tuple[str, str, str, str], Dict[str, Any]],
     method: str,
@@ -269,15 +259,7 @@ def _find_task(
     cluster_id: str,
     pred_yaml_tag: str,
 ) -> Optional[Dict[str, Any]]:
-    # Tasks use dashed method names (``boltz-1``/``boltz-2``); try caller's
-    # form first then the dashed alias.
-    t = idx.get((method, pair_type, cluster_id, pred_yaml_tag))
-    if t is not None:
-        return t
-    aliased = _METHOD_TASK_ALIAS.get(method)
-    if aliased is not None:
-        return idx.get((aliased, pair_type, cluster_id, pred_yaml_tag))
-    return None
+    return idx.get((method, pair_type, cluster_id, pred_yaml_tag))
 
 
 def _find_cluster_task(
@@ -292,12 +274,10 @@ def _find_cluster_task(
     requested entity wasn't modeled directly. ``suffix='_m'`` / ``'_x'``
     constrains to apo / holo side for induced sets.
     """
-    aliased = _METHOD_TASK_ALIAS.get(method, method)
     for t in tasks:
         if t.get("method_type") != pair_type or t.get("cluster_id") != cluster_id:
             continue
-        m = t.get("method")
-        if m != method and m != aliased:
+        if t.get("method") != method:
             continue
         if suffix is not None:
             tag = t.get("prediction_yaml_tag", "") or ""
@@ -316,7 +296,7 @@ def process_apo_monomers(
     ref2: str,
     method: str,
     error_list: List[Dict[str, Any]],
-    pair_type: str = "apo-monomers",
+    pair_type: str = "intrinsic",
     all_tasks: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     # New valid_pairs schema doesn't say which ref was modeled -- probe
@@ -390,23 +370,6 @@ def process_apo_monomers(
             }
         )
         return None
-
-    # If dynamic_loss missing, attempt to swap method_type segment to apo-monomers (ported behavior)
-    try:
-        first_seed = list(per_seed_loss.keys())[0]
-        if (
-            per_seed_loss[first_seed]["ref1"].get("dynamic_loss") is None
-            or per_seed_loss[first_seed]["ref2"].get("dynamic_loss") is None
-        ):
-            current_method_type = get_pair_type_from_path(distogram_loss_file)
-            if current_method_type is not None and current_method_type != "apo-monomers":
-                alt = Path(str(distogram_loss_file).replace(current_method_type, "apo-monomers"))
-                if alt.exists():
-                    per_seed_loss_apo = parse_seed_results(alt, ref1, ref2)
-                    if per_seed_loss_apo:
-                        per_seed_loss = per_seed_loss_apo
-    except Exception:
-        pass
 
     predictions = build_predictions(per_seed_loss, dist_ref1_ref2, dynamic_dist_ref1_ref2, ref1, ref2)
     mean_confbench, mean_dynamic_confbench = calc_mean_scores(predictions)
@@ -495,22 +458,6 @@ def process_induced(
 
     # APO
     per_seed_loss_apo = parse_seed_results(distogram_loss_file_apo, ref1, ref2)
-    try:
-        first_seed = list(per_seed_loss_apo.keys())[0]
-        if (
-            per_seed_loss_apo[first_seed]["ref1"].get("dynamic_loss") is None
-            or per_seed_loss_apo[first_seed]["ref2"].get("dynamic_loss") is None
-        ):
-            current_method_type = get_pair_type_from_path(distogram_loss_file_apo)
-            if current_method_type is not None and current_method_type != "apo-monomers":
-                alt = Path(str(distogram_loss_file_apo).replace(current_method_type, "apo-monomers"))
-                if alt.exists():
-                    per_seed_loss_apo2 = parse_seed_results(alt, ref1, ref2)
-                    if per_seed_loss_apo2:
-                        per_seed_loss_apo = per_seed_loss_apo2
-    except Exception:
-        pass
-
     apo_predictions = build_predictions(per_seed_loss_apo, dist_ref1_ref2, dynamic_dist_ref1_ref2, ref1, ref2)
     apo_mean_confbench, apo_mean_dynamic_confbench = calc_mean_scores(apo_predictions)
 
@@ -573,9 +520,7 @@ def main() -> None:
     error_list: List[Dict[str, Any]] = []
 
     for pair_type, pairs in valid_pairs_data.items():
-        # ``apo-monomers`` (legacy) and ``intrinsic`` (current) name the
-        # same set; keep the original key for task-index lookups.
-        is_apo_set = pair_type in ("apo-monomers", "intrinsic")
+        is_apo_set = pair_type == "intrinsic"
         dict_per_pair: Dict[str, Any] = {}
         for cluster_id, pair_info in pairs.items():
             for pair_item in pair_info:
