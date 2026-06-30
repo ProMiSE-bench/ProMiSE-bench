@@ -1,138 +1,88 @@
-# ProMiSE-Bench Curation Pipeline
+# Curation (`src/curation/`)
 
-Data curation pipeline for building the **ProMiSE** (Protein Multi-State Evaluation) benchmark — a curated set of conformational-change pairs
-from the PDB.
+Build the ProMiSE benchmark from PDB mmCIFs: clustering, crystal filtering, pair extraction, redundancy removal.
+
+Prerequisites: `bash install.sh` (`promise` env; step 5 uses `prodigy-cryst` env if available).
 
 ---
 
-## Prerequisites
-
-- `install.sh`
-
-
-## Quick Start
+## Quick start
 
 ```bash
 conda activate promise
 
 promise_data run \
-    --spec data/clusters.json \
-    --mmcif-store /path/to/pdb_mmcif/mmcif_files
+  --spec data/clusters.json \
+  --mmcif-store /path/to/pdb_mmcif/mmcif_files
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--spec` | Cluster specification JSON (GroupSet format) |
-| `--mmcif-store` | Directory of PDB mmCIF files (`*.cif`) |
-| `--keep-intermediates` | Keep intermediate directories (asms-raw, asms-bio, etc.) under `data/`. By default, they are written to a temporary directory and deleted when the pipeline finishes. |
+| `--spec` | Cluster spec JSON (GroupSet) |
+| `--mmcif-store` | Flat mmCIF directory (`*.cif`) |
+| `--keep-intermediates` | Keep `asms-*`, `combinations/`, etc. under `data/` (default: temp dir, deleted at end) |
+| `-C / --data-root` | Custom data root instead of `data/` |
 
-All outputs are written under `data/`. Final curated dataset: `data/dataset-pipeline/`.
+Final output: `data/dataset-pipeline/`. List steps: `promise_data steps`.
 
-### Downloading mmCIF Files
+### Partial runs
 
 ```bash
-# Specific PDB IDs
-python -m curation.download_mmcif --data-dir /path --pdb-list ids.txt
-
-# Full PDB mirror (~600 GB, requires stable connection)
-python -m curation.download_mmcif --data-dir /path
+promise_data run --spec data/clusters.json --mmcif-store /path --start-from curate_sets
+promise_data run --spec data/clusters.json --mmcif-store /path --stop-after cluster_by_tmscore
 ```
 
-**Warning**: Full PDB mirror download is ~600 GB and may take several hours to days depending on network speed. Ensure sufficient disk space and stable internet connection before proceeding.
+### Single step
+
+```bash
+python -m curation.pipeline.create_msa --help
+python -m curation.pipeline.curate_sets --help
+```
 
 ---
 
-## Pipeline Overview
+## Pipeline steps
 
-```
-promise_data steps
-
- 1. create_msa             Build MSAs (FAMSA) and extract Cα coords
- 2. pairwise_tm            Pairwise TM-scores within each cluster
- 3. cluster_by_tmscore     Sub-cluster by TM-score, extract pairs
- 4. prepare_inputs         Parse assembly info from mmCIF
- 5. run_prodigy            Classify crystal contacts (PRODIGY-cryst)
- 6. filter_xtal            Remove crystal-contact assemblies
- 7. subsets                Filter by sequence identity
- 8. process_metal          Remove low-coordination metal ions
- 9. curate_sets            Extract conformational-change pairs
-10. select_representative  Select representatives by binding-site compatibility
-11. filter_seq_clusters    Remove redundant clusters (MMseqs2, 40% identity)
-```
-
-| # | Step | Key Outputs |
+| # | Step | Key outputs |
 |---|------|-------------|
 | 1 | `create_msa` | `data/msas/`, `data/coords/` |
 | 2 | `pairwise_tm` | `data/scores/` |
-| 3 | `cluster_by_tmscore` | `data/clusters/`, `data/filtered-pairs.csv` |
-| 4 | `prepare_inputs` | `data/asms-raw/`, `data/cif-asms/` |
-| 5 | `run_prodigy` | `data/pair-calls.csv` |
-| 6 | `filter_xtal` | `data/asms-bio/` |
-| 7 | `subsets` | `data/asms-subset/` |
-| 8 | `process_metal` | `data/asms-metal/` |
-| 9 | `curate_sets` | `data/combinations/` |
-| 10 | `select_representative` | `data/combinations-filtered/` |
-| 11 | `filter_seq_clusters` | `data/dataset-pipeline/` |
+| 3 | `cluster_by_tmscore` | `data/clusters/`, `filtered-pairs.csv` |
+| 4 | `prepare_inputs` | `asms-raw/`, `cif-asms/` |
+| 5 | `run_prodigy` | `pair-calls.csv` |
+| 6 | `filter_xtal` | `asms-bio/` |
+| 7 | `subsets` | `asms-subset/` |
+| 8 | `process_metal` | `asms-metal/` |
+| 9 | `curate_sets` | `combinations/` |
+| 10 | `select_representative` | `combinations-filtered/` |
+| 11 | `filter_seq_clusters` | `dataset-pipeline/` |
+| 12 | `auxillary_filters` | final cleanup on `dataset-pipeline/` |
 
-### Partial Execution
+---
 
-```bash
-# Resume from a specific step
-promise_data run --spec spec.json --mmcif-store /path --start-from curate_sets
-
-# Run only steps 1-3
-promise_data run --spec spec.json --mmcif-store /path --stop-after cluster_by_tmscore
-
-# Run a range
-promise_data run --spec spec.json --mmcif-store /path \
-    --start-from prepare_inputs --stop-after process_metal
-```
-
-### Custom Output Directory
+## mmCIF download
 
 ```bash
-promise_data run --spec spec.json --mmcif-store /path -C /work/output
-```
-
-### Running Individual Steps
-
-```bash
-python -m curation.create_msa --help
-python -m curation.curate_sets --help
+python src/curation/utils/download_mmcif.py --data-dir /path/to/mmcif --pdb-list ids.txt
+python src/curation/utils/download_mmcif.py --data-dir /path/to/mmcif   # full mirror (~600 GB)
 ```
 
 ---
 
-## Project Structure
+## Evaluation prep (after release CSVs)
 
-```
-src/curation/
-│
-├── __main__.py                     
-├── run.py                          
-│
-├── utils/                          
-│   ├── constants.py                
-│   ├── typedefs.py                 
-│   ├── pdb_utils.py                
-│   └── download_mmcif.py           # Download mmCIF files from RCSB
-│
-└── pipeline/                       
-    ├── __init__.py                 
-    ├── create_msa.py               1.  Build MSAs, extract Cα coordinates
-    ├── pairwise_tm_multiprocessing.py  2.  Pairwise TM-score computation
-    ├── cluster_by_tmscore.py       3.  Agglomerative clustering by TM-score
-    ├── prepare_inputs_gemmi.py     4.  Assembly extraction from mmCIF
-    ├── run_prodigy.py              5.  Crystal contact classification
-    ├── filter_xtal.py              6.  Crystal-contact assembly filtering
-    ├── subsets.py                  7.  Sequence-identity based filtering
-    ├── process_metal.py            8.  Low-coordination metal filtering
-    ├── curate_sets.py              9.  Conformational-change pair extraction
-    ├── select_representative.py   10.  Representative selection by binding-site
-    └── filter_seq_clusters.py     11.  MMseqs2 redundancy removal
+The released dataset in `data/dataset/` is not a 1:1 rerun of the pipeline (manual edits after step 9). For eval inputs:
+
+```bash
+bash scripts/setup_examples_layout.sh
+python -m curation.make_pairs   # → valid_pairs.json, seq_cluster_to_answer_map.json
 ```
 
-Note that the final dataset presented involves a manual curation step. Therefore, simply running the full pipeline will not reproduce the exact dataset used in this work. After Step 9 (curate_sets.py), we manually removed a small number of structure pairs that exhibited conformational changes but lacked binders or were associated with crystal artifacts.
+See `src/eval/README.md` for `promise_eval run`.
 
-We provide the file `representative_sequences_total.json`, which contains the representative sequences selected for the released dataset. This file may differ from the one generated automatically by the pipeline.
+---
 
+## Notes
+
+- Post–`curate_sets` manual curation was applied for the paper dataset; `representative_sequences_total.json` may differ from pipeline output.
+- Modules live under `src/curation/pipeline/`; shared helpers in `src/curation/utils/`.

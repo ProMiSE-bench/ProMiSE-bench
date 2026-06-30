@@ -7,16 +7,16 @@ A curated benchmark dataset of protein conformational changes derived from exper
 ## Overview
 
 ProMiSE-bench provides high-quality protein conformational change pairs for:
-- Assessing protein structure prediction models (e.g., AlphaFold3, Boltz-1,2, Chai-1)
+- Assessing protein structure prediction models (e.g., AlphaFold3, Boltz-1,2, Chai-1, BioEmu)
 - Evaluating multi-state conformation sampling capabilities of prediction models with novel metrics
 
 
 
 ### Key Features
 
-- **🧬 Biology-Aware Pairs**: High-resolution pairs capturing binder-induced conformational changes
-- **🔍 Stringent QC Pipeline**: Removal of crystal artifacts and redundant assemblies to ensure physiological relavance
-- **📊 Advanced Evaluation**: Multi-state success metrics and rigorous leakage analysis beyond traditional RMSD
+- **Biology-Aware Pairs**: High-resolution pairs capturing binder-induced conformational changes
+- **Stringent QC Pipeline**: Removal of crystal artifacts and redundant assemblies to ensure physiological relavance
+- **Advanced Evaluation**: Multi-state success metrics and rigorous leakage analysis beyond traditional RMSD
 
 ### Quick Install
 
@@ -51,60 +51,6 @@ promise_data run \
 ```
 `data/clusters.json` is provided in the repo. However, mmcif files should be manually downloaded with `src/curation/utils/download_mmcif.py`. Refer to [src/curation/README.md](src/curation/README.md) for details.
 
-### Curation Pipeline Overview
-
-The curation pipeline consists of 11 steps:
-
-1. **Create key files**: Align conformers with FAMSA, etc.
-2. **TM-Score Computation**: Calculate structural similarity
-3. **Clustering**: Sub-cluster by TM-score
-4. **Input Preparation**: Parse mmCIF assemblies
-5. **Crystal Contact Detection**: Classify interfaces with PRODIGY-cryst
-6. **Crystal Filtering**: Remove crystallographic artifacts
-7. **Subset Filtering**: Filter by sequence identity
-8. **Metal Processing**: Remove low-coordination metal ions
-9. **Set Curation**: Extract conformational pairs
-10. **Representative Selection**: Filter by binding compatibility
-11. **Sequence Clustering**: Remove redundancy (MMseqs2 @ 40%)
-
-See [src/curation/README.md](src/curation/README.md) for step-by-step details.
-
-## Output Structure
-
-### Key Pipeline Outputs (available for download)
-```
-data/
-├── seqs/                      # FASTA files for each sequence cluster
-├── msas/                      # Multiple sequence alignments 
-├── clusters/                  # Conformational clustering results
-├── scores/                    # TM-score matrices
-├── filtered-pairs.csv         # Conformational pairs passing filters
-└── representative_sequences_total.json  # Representative sequences for inference
-
-```
-
-### Intermediate Files (generated during pipeline run)
-```
-data/
-├── asms-raw/                  # Parsed assembly information
-├── asms-bio/                  # Crystal-filtered assemblies
-├── asms-subset/               # Sequence identity filtered
-├── asms-metal/                # Metal coordination filtered
-├── combinations/              # Conformational pair combinations
-├── combinations-filtered/     # Representative pairs
-├── seqcluster_work/           # MMseqs2 result for sequence clustering
-├── pair-calls.csv             # Crystal artifact probability from PRODIGY-cryst
-└── binding_site_compatibility.csv  # Binding site comparison for representative selection
-
-```
-
-### Final Output
-
-```
-data/
-├── representative_sequences.json  # Representative sequences for inference
-└── dataset-pipeline/          # Curated dataset from the pipeline
-```
 
 **Download Key Pipeline Outputs**: (https://drive.google.com/drive/folders/1BALc--RHPy8QVZaFNtI3LLXFfGWL_z4V?usp=drive_link)
 
@@ -125,27 +71,6 @@ promise_data run \
     --start-from prepare_inputs
 ```
 
-## Project Structure
-
-```
-promise-bench/
-├── README.md                               
-├── pyproject.toml                          
-├── install.sh                              # Installation script
-├── environment.yaml                        # Main conda environment
-├── environment-prodigy.yaml                # Prodigy-cryst environment
-├── data/                                   
-│   ├── clusters.json                       # Input cluster specification (provided)
-│   ├── preference_score.json               # Preference metrics of final curated dataset
-│   └── dataset/                            # Final curated dataset
-└── src/
-    └── curation/                           
-        ├── README.md                       
-        ├── run.py                          
-        ├── pipeline/                       # Pipeline orchestration & step modules
-        └── utils/                          # Utility functions
-    
-```
 
 Pre-computed outputs downloaded (`data.tar.gz`) should be unzipped under `data/` directory.
 
