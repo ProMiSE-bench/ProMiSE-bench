@@ -64,13 +64,17 @@ pipeline:
   # or paths relative to the repo root. Set lists to try glob patterns in order
   # ({method_type}, {cluster_id}, {yaml_tag} are substituted; intrinsic = dynamics).
   distogram_enrich:
-    af3_chain_mappings: null
-    boltz_chain_mappings: null
-    chai_fasta_root: null
+    af3_chain_mappings: data/chain_mappings/af3_chain_mappings.json
+    boltz_chain_mappings: data/chain_mappings/boltz_chain_mappings.json  # boltz2 only
+    boltz1_chain_mappings: data/chain_mappings/boltz1_chain_mappings.json
+    chai_fasta_root: /home.galaxy4/seeun/works/projects/multi_bench/input/chai-1/
     distogram:
-      boltz2: []
-      boltz1: []
-      af3: []
+      af3:
+        - "/home.galaxy4/bonjae02/projects/promise-samples/af3/{method_type}/{cluster_id}/{yaml_tag}/seed_*/*/distogram.npz"
+      boltz1:
+        - "/home.galaxy4/bonjae02/projects/promise-samples/boltz1/{method_type}/{cluster_id}/{yaml_tag}/seed_*/boltz_results_{yaml_tag}/predictions/{yaml_tag}/{yaml_tag}_distogram.npz"
+      boltz2:
+        - "/home.galaxy4/bonjae02/projects/promise-samples/boltz2/{method_type}/{cluster_id}/{yaml_tag}/seed_*/boltz_results_{yaml_tag}/predictions/{yaml_tag}/{yaml_tag}_distogram.npz"
       bioemu: []
 # =====================================================================
 # Evaluation

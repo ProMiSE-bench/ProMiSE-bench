@@ -501,6 +501,64 @@ def extract_af3_chain_mapping(
     return result
 
 
+def _chain_id_from_yaml_stem(yaml_stem: str) -> str:
+    parts = yaml_stem.split("_")
+    return parts[2] if len(parts) >= 3 else "A"
+
+
+def _monomer_chain_mapping_from_distogram_npz(
+    distogram_path: Path, chain_id: str
+) -> dict:
+    """Minimal polymer chain mapping when Boltz processed NPZ is unavailable."""
+    data = np.load(distogram_path)
+    disto = data["distogram"]
+    size = int(disto.shape[1])
+    return {
+        "chains": {
+            chain_id: {
+                "start": 0,
+                "end": size - 1,
+                "length": size,
+                "mol_type": "polymer",
+            }
+        },
+        "total_length": size,
+        "distogram_size": size,
+        "size_match": True,
+    }
+
+
+def _find_boltz_prediction_cif(distogram_npz: Path) -> Optional[Path]:
+    """Return a Boltz prediction CIF next to the distogram NPZ (same as struct alignment)."""
+    parent = distogram_npz.parent
+    stem = distogram_npz.name.replace("_distogram.npz", "")
+    named = parent / f"{stem}_model_0.cif"
+    if named.exists():
+        return named
+    candidates = sorted(parent.glob("*_model_*.cif"))
+    return candidates[0] if candidates else None
+
+
+def _chain_seq_mapping_from_prediction_cif(
+    distogram_npz: Path,
+) -> Optional[dict]:
+    """
+    Build chain -> distogram index ranges from the prediction CIF.
+
+    Matches struct ConfBench: ``mobile_chain`` / ``target_chain`` are CIF
+    ``label_asym_id`` values (e.g. oligomer swap A1/B1), not yaml entity ids.
+    """
+    cif_path = _find_boltz_prediction_cif(distogram_npz)
+    if cif_path is None:
+        return None
+    mapping = extract_chain_seq_mapping(cif_path, distogram_npz)
+    if not mapping.get("chains"):
+        return None
+    for info in mapping["chains"].values():
+        info.setdefault("mol_type", "polymer")
+    return mapping
+
+
 def extract_chain_seq_mapping(cif_path: Path, distogram_path: Optional[Path] = None) -> dict:
     """
     Extract chain to distogram index mapping from CIF file.
@@ -737,6 +795,28 @@ def collect_boltz_distograms(output_base: Path, force: bool = False, patterns: l
                 )
                 print(f"  Warning: {msg}")
                 errors.append({"type": "MissingProcessedNPZ", "yaml_stem": yaml_stem, "method": boltz1_or_2, "method_type": set_name, "cluster": cluster, "distogram": str(npz)})
+                try:
+                    chain_mapping = _chain_seq_mapping_from_prediction_cif(npz)
+                    if not chain_mapping:
+                        chain_id = _chain_id_from_yaml_stem(yaml_stem)
+                        chain_mapping = _monomer_chain_mapping_from_distogram_npz(
+                            npz, chain_id
+                        )
+                    with open(mapping_file, "w") as f:
+                        json.dump(chain_mapping, f, indent=2)
+                    mappings_created += 1
+                except Exception as e:
+                    print(
+                        f"  Warning: Failed distogram-only chain mapping for {yaml_stem}: {e}"
+                    )
+                    errors.append(
+                        {
+                            "type": "DistogramOnlyMappingError",
+                            "yaml_stem": yaml_stem,
+                            "distogram": str(npz),
+                            "message": str(e),
+                        }
+                    )
             else:
                 try:
                     chain_mapping = extract_chain_seq_mapping_from_boltz_npz(processed_npz, npz)
@@ -1104,6 +1184,21 @@ def collect_bioemu_distograms(output_base: Path, force: bool = False, patterns: 
 
 
 
+def _iter_apo_method_infos(apo_predictions: dict):
+    """Yield ``(method, method_info)`` from flat or tag-nested ``apo_predictions``."""
+    if not apo_predictions:
+        return
+    sample = next(iter(apo_predictions.values()), None)
+    if isinstance(sample, dict) and ("pattern" in sample or "yaml_tag" in sample):
+        yield from apo_predictions.items()
+        return
+    for _tag, methods in apo_predictions.items():
+        if not isinstance(methods, dict):
+            continue
+        for method, method_info in methods.items():
+            yield method, method_info
+
+
 def generate_distogram_tasks(
     distogram_json: Path,
     output_base: Path,
@@ -1157,7 +1252,9 @@ def generate_distogram_tasks(
 
             # Process apo predictions
             if "apo_predictions" in cluster_data:
-                for method, method_info in cluster_data["apo_predictions"].items():
+                for method, method_info in _iter_apo_method_infos(
+                    cluster_data["apo_predictions"]
+                ):
                     if method not in _DISTOGRAM_METHODS:
                         continue
                     if method_filter and method != method_filter:
@@ -1498,6 +1595,11 @@ def main():
         default=None,
         help="Output path for distogram tasks JSON (default: {output_dir}/distogram_tasks.json)",
     )
+    parser.add_argument(
+        "--allow-mapping-errors",
+        action="store_true",
+        help="Do not exit 1 when chain-mapping extraction had warnings (symlinks still written)",
+    )
     args = parser.parse_args()
 
     output_base = E.distogram_collect_output_dir(args.output_dir)
@@ -1567,11 +1669,14 @@ def main():
             print(f"Saved combined {len(all_errors)} mapping errors to {err_all_path}")
         except Exception as e:
             print(f"Warning: Failed to save combined errors to {err_all_path}: {e}")
-        # Exit non-zero to signal failure
-        import sys
+        if not args.allow_mapping_errors:
+            import sys
 
-        print("Errors encountered during mapping extraction. Exiting with status 1.")
-        sys.exit(1)
+            print("Errors encountered during mapping extraction. Exiting with status 1.")
+            sys.exit(1)
+        print(
+            f"Warning: {len(all_errors)} mapping issues (--allow-mapping-errors; continuing)"
+        )
 
     if not args.all and not args.method:
         parser.print_help()

@@ -130,19 +130,85 @@ def extract_file_info(file_path: Path, method: str, yaml_tag: str) -> Dict[str, 
     }
 
 
+def _tag_base(tag: str) -> str:
+    if tag.endswith("_m") or tag.endswith("_x"):
+        return tag[:-2]
+    return tag
+
+
+def _predictions_for_tag(
+    raw: Dict[str, Any],
+    yaml_tag: str,
+    *,
+    intrinsic_cluster_fallback: bool = False,
+) -> Dict[str, Any]:
+    """Return ``{method: info}`` for one yaml tag (nested or legacy flat layout).
+
+    Matches ``_m`` / ``_x`` suffix variants. For intrinsic, falls back to any
+    cluster prediction entry when the cluster has a single on-disk inference run.
+    """
+    if yaml_tag in raw and isinstance(raw[yaml_tag], dict):
+        nested = raw[yaml_tag]
+        if nested and isinstance(next(iter(nested.values()), None), dict):
+            sample = next(iter(nested.values()))
+            if "pattern" in sample or "yaml_tag" in sample:
+                return nested
+    want_base = _tag_base(yaml_tag)
+    if raw and isinstance(next(iter(raw.values()), None), dict):
+        sample = next(iter(raw.values()))
+        if "pattern" in sample or "yaml_tag" in sample:
+            if any(
+                isinstance(v, dict)
+                and (
+                    v.get("yaml_tag") == yaml_tag
+                    or _tag_base(str(v.get("yaml_tag", ""))) == want_base
+                    or _tag_base(str(v.get("canonical_yaml_tag", ""))) == want_base
+                )
+                for v in raw.values()
+            ):
+                return raw
+    for _key, methods_dict in raw.items():
+        if not isinstance(methods_dict, dict):
+            continue
+        if _key == yaml_tag or _tag_base(_key) == want_base:
+            return methods_dict
+        for method_info in methods_dict.values():
+            if not isinstance(method_info, dict):
+                continue
+            disk_tag = str(method_info.get("yaml_tag", ""))
+            canon_tag = str(method_info.get("canonical_yaml_tag", ""))
+            if (
+                disk_tag == yaml_tag
+                or canon_tag == yaml_tag
+                or _tag_base(disk_tag) == want_base
+                or _tag_base(canon_tag) == want_base
+            ):
+                return methods_dict
+    if intrinsic_cluster_fallback:
+        for methods_dict in raw.values():
+            if not isinstance(methods_dict, dict) or not methods_dict:
+                continue
+            sample = next(iter(methods_dict.values()), None)
+            if isinstance(sample, dict) and ("pattern" in sample or "yaml_tag" in sample):
+                return methods_dict
+    return {}
+
+
+def _get_apo_predictions(
+    cluster_data: Dict[str, Any], apo_entity: str, *, pair_type: str = ""
+) -> Dict[str, Any]:
+    return _predictions_for_tag(
+        cluster_data.get("apo_predictions", {}),
+        apo_entity,
+        intrinsic_cluster_fallback=(pair_type == _INTRINSIC_SET),
+    )
+
+
 def _infer_model_entity(cluster_data: Dict[str, Any], valid_pair: List[str]) -> Optional[str]:
-    """Pick prediction yaml tag for intrinsic pairs (from map, else first valid_pair tag)."""
-    tags_in_preds: List[str] = []
-    for method_info in cluster_data.get("apo_predictions", {}).values():
-        if isinstance(method_info, dict):
-            yt = method_info.get("yaml_tag")
-            if yt:
-                tags_in_preds.append(str(yt))
+    """Pick prediction yaml tag for intrinsic pairs (cluster shares one inference run)."""
     for tag in valid_pair:
-        if tag in tags_in_preds:
+        if _get_apo_predictions(cluster_data, tag, pair_type=_INTRINSIC_SET):
             return tag
-    if tags_in_preds:
-        return tags_in_preds[0]
     return valid_pair[0] if valid_pair else None
 
 
@@ -226,22 +292,7 @@ def _other_cluster_apo_refs(
 
 def _get_holo_predictions(cluster_data: Dict[str, Any], holo_entity: str) -> Dict[str, Any]:
     """Return per-method prediction info for one holo yaml tag."""
-    raw = cluster_data.get("holo_predictions", {})
-    if holo_entity in raw and isinstance(raw[holo_entity], dict):
-        nested = raw[holo_entity]
-        if nested and isinstance(next(iter(nested.values()), None), dict):
-            sample = next(iter(nested.values()))
-            if "pattern" in sample or "yaml_tag" in sample:
-                return nested
-    for _key, methods_dict in raw.items():
-        if not isinstance(methods_dict, dict):
-            continue
-        if _key == holo_entity:
-            return methods_dict
-        for method_info in methods_dict.values():
-            if isinstance(method_info, dict) and method_info.get("yaml_tag") == holo_entity:
-                return methods_dict
-    return {}
+    return _predictions_for_tag(cluster_data.get("holo_predictions", {}), holo_entity)
 
 
 def generate_alignment_tasks(
@@ -250,6 +301,7 @@ def generate_alignment_tasks(
     output_json: Path,
     output_dir: Path,
     cif_dir: Path,
+    methods_filter: Optional[List[str]] = None,
 ) -> List[Dict]:
     with open(valid_pairs_file) as f:
         valid_pairs = json.load(f)
@@ -325,11 +377,12 @@ def generate_alignment_tasks(
 
                 if is_intrinsic:
                     prediction_dict_by_reference = {
-                        reference_entities[0]: cluster_data.get("apo_predictions", {})
+                        ref: _get_apo_predictions(cluster_data, ref, pair_type=_INTRINSIC_SET)
+                        for ref in reference_entities
                     }
                 else:
                     prediction_dict_by_reference = {
-                        apo_entity: cluster_data.get("apo_predictions", {}),
+                        apo_entity: _get_apo_predictions(cluster_data, apo_entity),
                         holo_entity: holo_preds,
                     }
 
@@ -350,9 +403,16 @@ def generate_alignment_tasks(
                         continue
 
                     for method, method_info in prediction_dict.items():
+                        if methods_filter and method not in methods_filter:
+                            continue
                         pattern = method_info.get("pattern", "")
                         yaml_tag = method_info.get("yaml_tag", "")
-                        target_chain = method_info.get("target_chain", "A")
+                        target_chain = method_info.get("target_chain")
+                        if not target_chain:
+                            if method in ("boltz1", "boltz2") and yaml_tag:
+                                target_chain = extract_chain_from_yaml(yaml_tag)
+                            else:
+                                target_chain = "A"
 
                         if not pattern:
                             continue
@@ -502,13 +562,23 @@ def main() -> None:
         default=(E.dir("output") / "aligned_cif").resolve(),
     )
     p.add_argument("--cif-dir", type=Path, default=C.dir("cif_asms"))
+    p.add_argument(
+        "--methods",
+        type=str,
+        default=None,
+        help="Comma-separated prediction methods to include (e.g. boltz2)",
+    )
     args = p.parse_args()
+    methods_filter = None
+    if args.methods:
+        methods_filter = [m.strip() for m in args.methods.split(",") if m.strip()]
     generate_alignment_tasks(
         valid_pairs_file=args.valid_pairs,
         distogram_data_file=args.answer_map,
         output_json=args.output,
         output_dir=args.output_dir,
         cif_dir=args.cif_dir,
+        methods_filter=methods_filter,
     )
 
 

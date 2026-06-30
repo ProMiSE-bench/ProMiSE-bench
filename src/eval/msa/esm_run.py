@@ -6,17 +6,15 @@ Predict residue-residue contacts from MSA using ESM-MSA-1b model.
 
 Usage:
     # Predict contacts for example data
-    python -m src.eval.esm_run --examples-dir examples/msa-server
+    python -m eval.msa.esm_run --examples-dir examples/msa-server
 
-    # Predict for specific a3m files
-    python -m src.eval.esm_run --input examples/msa-server/intrinsic/7OYW_1/7OYW_1.a3m
-
-    # Multiple seeds for robustness
-    python -m src.eval.esm_run --examples-dir examples/msa-server --multi-seed
+    # Or use pipeline MSA dir via valid_pairs
+    python -m eval.msa.esm_run --from-valid-pairs data/dataset/valid_pairs.json
 """
 
 import sys
 import os
+import json
 import string
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -29,6 +27,7 @@ from scipy.spatial.distance import cdist
 
 import esm
 
+from utils._config import pipeline_cfg as C
 from utils._config import eval_cfg as E
 
 
@@ -210,6 +209,26 @@ def discover_a3m_files(examples_dir: str) -> List[Path]:
     return sorted(Path(examples_dir).rglob("*.a3m"))
 
 
+def a3m_path_for_cluster(msa_dir: Path, cluster_id: str) -> Path:
+    cid = str(cluster_id).upper()
+    sub = str(cluster_id)[1:3].upper()
+    return msa_dir / sub / f"{cid}.a3m"
+
+
+def discover_a3m_from_valid_pairs(valid_pairs_path: Path, msa_dir: Path) -> List[Path]:
+    with valid_pairs_path.open() as handle:
+        valid_pairs = json.load(handle)
+    clusters: set[str] = set()
+    for cluster_dict in valid_pairs.values():
+        clusters.update(cluster_dict.keys())
+    files: List[Path] = []
+    for cluster_id in sorted(clusters):
+        path = a3m_path_for_cluster(msa_dir, cluster_id)
+        if path.exists():
+            files.append(path)
+    return files
+
+
 # ============================================================================
 # CLI
 # ============================================================================
@@ -217,6 +236,19 @@ def discover_a3m_files(examples_dir: str) -> List[Path]:
 @click.command()
 @click.option('--examples-dir', type=click.Path(exists=True), default=None,
               help='examples/msa-server directory')
+@click.option(
+    '--from-valid-pairs',
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help='Discover one a3m per cluster from valid_pairs.json',
+)
+@click.option(
+    '--msa-dir',
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=lambda: C.dir('msas'),
+    show_default=True,
+    help='MSA root (data/msas) used with --from-valid-pairs',
+)
 @click.option('--input', '-i', 'input_files', type=click.Path(exists=True),
               multiple=True, help='Input a3m file(s)')
 @click.option('--output-dir', '-o', type=click.Path(),
@@ -235,14 +267,30 @@ def discover_a3m_files(examples_dir: str) -> List[Path]:
 @click.option('--skip-existing', is_flag=True)
 @click.option('--device', '-d', type=click.Choice(['cuda', 'cpu']),
               default=DEFAULT_DEVICE, show_default=True)
-def main(examples_dir, input_files, output_dir, sample_size, num_seqs,
-         seed, multi_seed, seeds, skip_existing, device):
+def main(
+    examples_dir,
+    from_valid_pairs,
+    msa_dir,
+    input_files,
+    output_dir,
+    sample_size,
+    num_seqs,
+    seed,
+    multi_seed,
+    seeds,
+    skip_existing,
+    device,
+):
     """ESM-MSA-1b Contact Prediction for ProMiSE-bench."""
-    if not examples_dir and not input_files:
-        raise click.UsageError('One of --examples-dir or --input is required.')
+    if not examples_dir and not input_files and not from_valid_pairs:
+        raise click.UsageError(
+            'One of --examples-dir, --from-valid-pairs, or --input is required.'
+        )
 
     # Collect input files
-    if examples_dir:
+    if from_valid_pairs:
+        a3m_files = discover_a3m_from_valid_pairs(from_valid_pairs, msa_dir)
+    elif examples_dir:
         a3m_files = discover_a3m_files(examples_dir)
     else:
         a3m_files = [Path(f) for f in input_files if Path(f).exists()]

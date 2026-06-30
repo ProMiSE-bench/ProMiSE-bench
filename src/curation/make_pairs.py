@@ -90,9 +90,30 @@ def get_conf(entry_id: str) -> Optional[int]:
 
 
 def tag_to_key(tag: str) -> Tuple[str, str, str]:
-    base = tag[:-2] if tag.endswith(('_m', '_x')) else tag
+    base = tag_base(tag)
     parts = base.split('_')
     return (parts[0].lower(), parts[1], parts[2]) if len(parts) >= 3 else (None, None, None)
+
+
+def tag_base(tag: str) -> str:
+    """Strip apo/holo suffix (_m / _x) for conformation-agnostic matching."""
+    if tag.endswith("_m") or tag.endswith("_x"):
+        return tag[:-2]
+    return tag
+
+
+def tag_suffix_variants(tag: str) -> List[str]:
+    """Return ``tag`` plus the alternate _m/_x form when applicable."""
+    variants = [tag]
+    if tag.endswith("_m"):
+        alt = f"{tag[:-2]}_x"
+    elif tag.endswith("_x"):
+        alt = f"{tag[:-2]}_m"
+    else:
+        return variants
+    if alt not in variants:
+        variants.append(alt)
+    return variants
 
 
 # ============================================================================
@@ -111,30 +132,91 @@ def _disk_set_names(set_name: str) -> List[str]:
     return [set_name]
 
 
+def _prediction_entry(
+    examples_dir: Path,
+    set_name: str,
+    cluster: str,
+    disk_tag: str,
+    canonical_tag: str,
+    pattern_templates: List[str],
+) -> Optional[Dict[str, Any]]:
+    for disk_set in _disk_set_names(set_name):
+        for pattern_template in pattern_templates:
+            pattern = pattern_template.format(
+                examples_dir=examples_dir,
+                set_name=disk_set,
+                cluster=cluster,
+                tag=disk_tag,
+            )
+            files = _glob_prediction_files(pattern)
+            if files:
+                entry: Dict[str, Any] = {
+                    "pattern": pattern,
+                    "count": len(files),
+                    "yaml_tag": disk_tag,
+                }
+                if disk_tag != canonical_tag:
+                    entry["canonical_yaml_tag"] = canonical_tag
+                return entry
+    return None
+
+
+@functools.lru_cache(maxsize=512)
+def _intrinsic_disk_tags_for_cluster(examples_dir_str: str, cluster: str) -> Tuple[str, ...]:
+    """Tag subdirs under an intrinsic cluster that contain at least one model's predictions."""
+    examples_dir = Path(examples_dir_str)
+    if not examples_dir.is_dir():
+        return ()
+    tags: Set[str] = set()
+    for model, templates in MODEL_PATTERNS.items():
+        if model == "bioemu":
+            continue
+        tpls = [templates] if isinstance(templates, str) else templates
+        for disk_set in _disk_set_names("intrinsic"):
+            cluster_dir = examples_dir / model / disk_set / cluster
+            if not cluster_dir.is_dir():
+                continue
+            for sub in cluster_dir.iterdir():
+                if not sub.is_dir() or sub.name == "log":
+                    continue
+                if _prediction_entry(
+                    examples_dir, "intrinsic", cluster, sub.name, sub.name, tpls
+                ):
+                    tags.add(sub.name)
+    return tuple(sorted(tags))
+
+
+def _disk_tag_candidates(set_name: str, cluster: str, tag: str, examples_dir: Path) -> List[str]:
+    """Ordered disk-tag probes: exact/suffix variants, then any intrinsic cluster tag."""
+    seen: Set[str] = set()
+    out: List[str] = []
+    for dt in tag_suffix_variants(tag):
+        if dt not in seen:
+            seen.add(dt)
+            out.append(dt)
+    if set_name == "intrinsic":
+        for dt in _intrinsic_disk_tags_for_cluster(str(examples_dir), cluster):
+            if dt not in seen:
+                seen.add(dt)
+                out.append(dt)
+    return out
+
+
 def get_predictions(examples_dir: Path, set_name: str, cluster: str, tag: str) -> Dict[str, dict]:
     if not examples_dir or not examples_dir.exists():
         return {}
-    
+
     predictions = {}
+    disk_tags = _disk_tag_candidates(set_name, cluster, tag, examples_dir)
     for model, pattern_templates in MODEL_PATTERNS.items():
         if isinstance(pattern_templates, str):
             pattern_templates = [pattern_templates]
-        for disk_set in _disk_set_names(set_name):
-            for pattern_template in pattern_templates:
-                pattern = pattern_template.format(
-                    examples_dir=examples_dir,
-                    set_name=disk_set,
-                    cluster=cluster,
-                    tag=tag,
-                )
-                files = _glob_prediction_files(pattern)
-                if files:
-                    entry: Dict[str, Any] = {"pattern": pattern, "count": len(files)}
-                    if tag:
-                        entry["yaml_tag"] = tag
-                    predictions[model] = entry
-                    break
-            if model in predictions:
+        for disk_tag in disk_tags:
+            entry = _prediction_entry(
+                examples_dir, set_name, cluster, disk_tag, tag, pattern_templates
+            )
+            if entry:
+                predictions[model] = entry
                 break
     return predictions
 
@@ -142,20 +224,16 @@ def get_predictions(examples_dir: Path, set_name: str, cluster: str, tag: str) -
 def add_predictions_to_data(data: Dict[str, Dict], examples_dir: Optional[Path]) -> Dict[str, Dict]:
     """Populate apo_predictions / holo_predictions for every cluster.
 
-    Apo: multi-conformation clusters can list several CSV tags, but typically
-    only one entity has on-disk predictions. Bioemu matches at the cluster
-    level (tag-agnostic) and would always "win" on the first tag, so we pick
-    the apo_tag whose ``get_predictions`` yields the highest model coverage.
-    Holo: nest per ``holo_tag`` -> ``{tag: {model: {pattern, count}}}``.
+    Both are keyed by yaml tag -> ``{model: {pattern, count, ...}}``.
     """
     for set_name, clusters in data.items():
         for cluster_name, info in clusters.items():
-            apo_preds: Dict[str, dict] = {}
+            apo_by_tag: Dict[str, Dict[str, dict]] = {}
             for tag in info.get("apo_tags") or []:
                 preds = get_predictions(examples_dir, set_name, cluster_name, tag)
-                if len(preds) > len(apo_preds):
-                    apo_preds = preds
-            info["apo_predictions"] = apo_preds
+                if preds:
+                    apo_by_tag[tag] = preds
+            info["apo_predictions"] = apo_by_tag
 
             holo_preds: Dict[str, Dict[str, dict]] = {}
             for tag in info.get("holo_tags") or []:
@@ -186,24 +264,141 @@ def get_cluster_name(row: dict) -> str:
     return cluster
 
 
+def _row_side(row: dict, side: str) -> Tuple[str, str, str, str]:
+    """Return (pdb, asm, chain, conf) for side ``a`` or ``b`` (both CSV formats)."""
+    suffix = "_a" if side == "a" else "_b"
+    pdb = (row.get(f"{side}_pdb") or row.get(f"pdb{suffix}", "")).lower()
+    asm = row.get(f"{side}_assembly_id") or row.get(f"asm{suffix}", "")
+    chain = row.get(f"{side}_chain") or row.get(f"chain{suffix}", "")
+    conf = row.get(f"{side}_conf_label") or row.get(f"conf_label{suffix}", "")
+    return pdb, asm, chain, conf
+
+
 def load_csv_pairs(csv_path: Path) -> Set[Tuple]:
     """Load valid pairs from CSV."""
     pairs = set()
     for row in load_csv(csv_path):
-        # Support both formats
-        a_pdb = (row.get('a_pdb') or row.get('pdb_a', '')).lower()
-        a_asm = row.get('a_assembly_id') or row.get('asm_a', '')
-        a_chain = row.get('a_chain') or row.get('chain_a', '')
-        
-        b_pdb = (row.get('b_pdb') or row.get('pdb_b', '')).lower()
-        b_asm = row.get('b_assembly_id') or row.get('asm_b', '')
-        b_chain = row.get('b_chain') or row.get('chain_b', '')
-        
-        a = (a_pdb, a_asm, a_chain)
-        b = (b_pdb, b_asm, b_chain)
+        a = _row_side(row, "a")[:3]
+        b = _row_side(row, "b")[:3]
         pairs.add((a, b))
         pairs.add((b, a))
     return pairs
+
+
+def build_valid_pairs_from_csv(
+    csv_dir: Path, data: Dict[str, Dict]
+) -> Dict[str, Dict[str, List[List[str]]]]:
+    """Build ``valid_pairs`` directly from CSV rows (filtered clusters only)."""
+    result: Dict[str, Dict[str, List[List[str]]]] = {sn: {} for sn in SET_NAMES}
+    seen: Dict[str, Dict[str, Set[Tuple[str, ...]]]] = {
+        sn: defaultdict(set) for sn in SET_NAMES
+    }
+
+    for set_name in SET_NAMES:
+        rows = load_csv(csv_dir / f"{set_name}.csv")
+        clusters = data.get(set_name, {})
+        is_intrinsic = set_name == "intrinsic"
+
+        for row in rows:
+            cluster = get_cluster_name(row)
+            if cluster not in clusters:
+                continue
+
+            a_pdb, a_asm, a_chain, _ = _row_side(row, "a")
+            b_pdb, b_asm, b_chain, _ = _row_side(row, "b")
+            if not all([a_pdb, a_asm, a_chain, b_pdb, b_asm, b_chain]):
+                continue
+
+            tag_a = make_tag(a_pdb, a_asm, a_chain, "m")
+            tag_b = make_tag(
+                b_pdb, b_asm, b_chain, "m" if is_intrinsic else "x"
+            )
+            pair_list = [tag_a, tag_b]
+            dedupe_key: Tuple[str, ...] = (
+                tuple(sorted(pair_list)) if is_intrinsic else (tag_a, tag_b)
+            )
+            if dedupe_key in seen[set_name][cluster]:
+                continue
+            seen[set_name][cluster].add(dedupe_key)
+            result[set_name].setdefault(cluster, []).append(pair_list)
+
+    return result
+
+
+def _entry_id_for_tag(tag: str, conf: str) -> str:
+    base = tag[:-2] if tag.endswith(("_m", "_x")) else tag
+    return f"{base}_conf_{conf}"
+
+
+def _entries_for_tags(
+    tags: List[str], rows: List[dict], is_intrinsic: bool
+) -> Tuple[List[str], List[str]]:
+    """Rebuild ``apo``/``holo`` entry ids for tags that appear in CSV pair rows."""
+    conf_by_base: Dict[str, str] = {}
+    for row in rows:
+        for side in ("a", "b"):
+            pdb, asm, chain, conf = _row_side(row, side)
+            if not (pdb and asm and chain):
+                continue
+            suffix = "m" if is_intrinsic or side == "a" else "x"
+            tag = make_tag(pdb, asm, chain, suffix)
+            base = tag[:-2] if tag.endswith(("_m", "_x")) else tag
+            conf_by_base.setdefault(base, conf)
+
+    apo_entries, holo_entries = [], []
+    for tag in tags:
+        base = tag[:-2] if tag.endswith(("_m", "_x")) else tag
+        conf = conf_by_base.get(base)
+        if conf is None:
+            continue
+        entry = _entry_id_for_tag(tag, conf)
+        if tag.endswith("_m"):
+            apo_entries.append(entry)
+        elif tag.endswith("_x"):
+            holo_entries.append(entry)
+    return apo_entries, holo_entries
+
+
+def restrict_to_valid_pairs(
+    data: Dict[str, Dict],
+    valid_pairs: Dict[str, Dict[str, List[List[str]]]],
+    csv_dir: Path,
+) -> Dict[str, Dict]:
+    """Keep only clusters/tags that appear in ``valid_pairs`` (CSV pair scope)."""
+    restricted: Dict[str, Dict] = {}
+    for set_name in SET_NAMES:
+        restricted[set_name] = {}
+        rows = load_csv(csv_dir / f"{set_name}.csv")
+        is_intrinsic = set_name == "intrinsic"
+        cluster_rows = defaultdict(list)
+        for row in rows:
+            cluster_rows[get_cluster_name(row)].append(row)
+
+        for cluster, pairs in valid_pairs.get(set_name, {}).items():
+            if cluster not in data.get(set_name, {}):
+                continue
+            used_tags: Set[str] = set()
+            for pair in pairs:
+                used_tags.update(pair)
+
+            info = json.loads(json.dumps(data[set_name][cluster]))
+            if is_intrinsic:
+                apo_tags = sorted(t for t in used_tags if t.endswith("_m"))
+                holo_tags = []
+            else:
+                apo_tags = sorted(t for t in used_tags if t.endswith("_m"))
+                holo_tags = sorted(t for t in used_tags if t.endswith("_x"))
+
+            apo_entries, holo_entries = _entries_for_tags(
+                apo_tags + holo_tags, cluster_rows.get(cluster, []), is_intrinsic
+            )
+            info["apo_tags"] = apo_tags
+            info["holo_tags"] = holo_tags
+            info["apo"] = apo_entries
+            info["holo"] = holo_entries
+            restricted[set_name][cluster] = info
+
+    return restricted
 
 
 # ============================================================================
@@ -324,7 +519,7 @@ def filter_data(data: Dict[str, Dict], valid_centers: Set[str]) -> Dict[str, Dic
 
 
 # ============================================================================
-# Valid Pairs Generation
+# Valid Pairs Generation (legacy helper; prefer build_valid_pairs_from_csv)
 # ============================================================================
 def generate_valid_pairs(data: Dict[str, Dict], csv_pairs: Dict[str, Set]) -> Dict[str, Dict]:
     result = {}
@@ -352,8 +547,6 @@ def generate_valid_pairs(data: Dict[str, Dict], csv_pairs: Dict[str, Set]) -> Di
                 result[set_name][cluster_name] = valid
     
     return result
-
-
 
 # ============================================================================
 # Distogram enrichment (config: pipeline.distogram_enrich in config/config.yaml)
@@ -476,36 +669,30 @@ def get_target_chain_for_method(
     segment = (path_segment or "").strip() or "intrinsic"
     if method == "af3":
         interested_chain = extract_chain_from_yaml_tag(yaml_tag)
-        return _require_chain_mapping(
-            method="af3",
-            interested_chain=interested_chain,
-            cluster_id=cluster_id,
-            yaml_tag=yaml_tag,
-            map_set_name=map_set_name,
-            mapping_json_path=_map_cfg_path(de.get("af3_chain_mappings")),
+        mapping = get_chain_mapping(
+            cluster_id, yaml_tag, map_set_name, _map_cfg_path(de.get("af3_chain_mappings"))
         )
+        if mapping and interested_chain in mapping:
+            return mapping[interested_chain]
+        return interested_chain
 
     if method == "boltz2":
         interested_chain = extract_chain_from_yaml_tag(yaml_tag)
-        return _require_chain_mapping(
-            method="boltz2",
-            interested_chain=interested_chain,
-            cluster_id=cluster_id,
-            yaml_tag=yaml_tag,
-            map_set_name=map_set_name,
-            mapping_json_path=_map_cfg_path(de.get("boltz_chain_mappings")),
+        mapping = get_chain_mapping(
+            cluster_id, yaml_tag, map_set_name, _map_cfg_path(de.get("boltz_chain_mappings"))
         )
+        if mapping and interested_chain in mapping:
+            return mapping[interested_chain]
+        return interested_chain
 
     if method == "boltz1":
         interested_chain = extract_chain_from_yaml_tag(yaml_tag)
-        return _require_chain_mapping(
-            method="boltz1",
-            interested_chain=interested_chain,
-            cluster_id=cluster_id,
-            yaml_tag=yaml_tag,
-            map_set_name=map_set_name,
-            mapping_json_path=_map_cfg_path(de.get("boltz1_chain_mappings")),
+        mapping = get_chain_mapping(
+            cluster_id, yaml_tag, map_set_name, _map_cfg_path(de.get("boltz1_chain_mappings"))
         )
+        if mapping and interested_chain in mapping:
+            return mapping[interested_chain]
+        return interested_chain
 
     if method == "chai":
         interested_chain_id = extract_chain_from_yaml_tag(yaml_tag)
@@ -592,7 +779,18 @@ def get_chain_mapping(
     if not all_mappings:
         return None
     set_key = (method_type or "").strip()
-    entry = all_mappings.get(f"{set_key}/{cluster_id}/{yaml_tag}")
+    entry = None
+    for yt in tag_suffix_variants(yaml_tag):
+        candidate = all_mappings.get(f"{set_key}/{cluster_id}/{yt}")
+        if isinstance(candidate, dict):
+            entry = candidate
+            break
+    if entry is None and set_key == "intrinsic":
+        prefix = f"intrinsic/{cluster_id}/"
+        for key, candidate in all_mappings.items():
+            if key.startswith(prefix) and isinstance(candidate, dict):
+                entry = candidate
+                break
     if not isinstance(entry, dict):
         return None
     modeled = entry.get("mapping")
@@ -678,6 +876,7 @@ def enhance_cluster_data(
     cluster_data: Dict,
     set_name: str,
     representative_sequences: Dict,
+    enrich_methods: Optional[Set[str]] = None,
 ) -> Dict:
     """
     Enhance cluster data with additional information needed for distogram analysis.
@@ -720,185 +919,159 @@ def enhance_cluster_data(
         enhanced_data["holo_references"] = holo_refs
 
     # Enhance predictions with target chain and distogram path information
-    # Handle apo_predictions (method -> info structure)
+    # apo_predictions / holo_predictions: tag -> method -> info
     if "apo_predictions" in enhanced_data:
-        for method, method_info in enhanced_data["apo_predictions"].items():
-            # Create enhanced method info by copying original
-            enhanced_method_info = json.loads(json.dumps(method_info))
-
-            # Add target chain based on method
-            if method == "bioemu":
-                # BioEmu always uses chain A
-                enhanced_method_info["target_chain"] = "A"
-
-                pattern = get_distogram_path_pattern(
-                    method, set_name, cluster_id, yaml_tag=""
+        enhanced_apo_by_tag: Dict[str, Dict[str, dict]] = {}
+        for yaml_tag, conformation_data in enhanced_data["apo_predictions"].items():
+            if not isinstance(conformation_data, dict):
+                continue
+            sample = next(iter(conformation_data.values()), None)
+            if isinstance(sample, dict) and ("pattern" in sample or "yaml_tag" in sample):
+                enhanced_apo_by_tag[yaml_tag] = _enhance_prediction_methods(
+                    conformation_data,
+                    method_label=f"apo_predictions/{yaml_tag}",
+                    cluster_id=cluster_id,
+                    set_name=set_name,
+                    af3_chain_json=af3_chain_json,
+                    boltz_chain_json=boltz_chain_json,
+                    boltz1_chain_json=boltz1_chain_json,
+                    default_yaml_tag=yaml_tag,
+                    enrich_methods=enrich_methods,
                 )
-                if pattern:
-                    enhanced_method_info["distogram_pattern"] = pattern
             else:
-                # For other methods, try to extract yaml_tag from pattern
-                pattern = method_info.get("pattern", "")
-                yaml_tag = extract_yaml_tag_from_pattern(pattern)
-                pred_set = extract_method_type_from_pattern(pattern) or set_name
+                raise click.ClickException(
+                    f"Unexpected apo_predictions shape for cluster {cluster_id}, tag {yaml_tag!r}"
+                )
+        enhanced_data["apo_predictions"] = enhanced_apo_by_tag
 
-                if yaml_tag:
-                    enhanced_method_info["yaml_tag"] = yaml_tag
-                    enhanced_method_info["reference_cif_path"] = get_reference_cif_path(
-                        yaml_tag
-                    )
-
-                    target_chain = get_target_chain_for_method(
-                        method, yaml_tag, pred_set, cluster_id, set_name
-                    )
-                    enhanced_method_info["target_chain"] = target_chain
-
-                    # Add distogram pattern when configured (silently skipped otherwise).
-                    if method in ("af3", "boltz1", "boltz2"):
-                        pattern = get_distogram_path_pattern(
-                            method, pred_set, cluster_id, yaml_tag
-                        )
-                        if pattern:
-                            enhanced_method_info["distogram_pattern"] = pattern
-
-                        # Add AF3 / Boltz chain mapping if available
-                        if method == "af3" and af3_chain_json:
-                            af3_mapping = get_chain_mapping(
-                                cluster_id,
-                                yaml_tag,
-                                set_name,
-                                af3_chain_json,
-                            )
-                            if af3_mapping:
-                                enhanced_method_info["chain_mapping"] = af3_mapping
-
-                        elif method == "boltz2" and boltz_chain_json:
-                            boltz_mapping = get_chain_mapping(
-                                cluster_id,
-                                yaml_tag,
-                                set_name,
-                                boltz_chain_json,
-                            )
-                            if boltz_mapping:
-                                enhanced_method_info["chain_mapping"] = boltz_mapping
-                        elif method == "boltz1" and boltz1_chain_json:
-                            boltz1_mapping = get_chain_mapping(
-                                cluster_id,
-                                yaml_tag,
-                                set_name,
-                                boltz1_chain_json,
-                            )
-                            if boltz1_mapping:
-                                enhanced_method_info["chain_mapping"] = boltz1_mapping
-                else:
-                    raise click.ClickException(
-                        f"Could not extract yaml_tag from pattern for {method} "
-                        f"in apo_predictions (cluster {cluster_id}): {pattern!r}"
-                    )
-
-            enhanced_data["apo_predictions"][method] = enhanced_method_info
-
-    # Handle holo_predictions (conformation -> method -> info structure)
     if "holo_predictions" in enhanced_data:
         for conformation, conformation_data in enhanced_data[
             "holo_predictions"
         ].items():
-            enhanced_conformation_data = {}
-
-            for method, method_info in conformation_data.items():
-                # Create enhanced method info by copying original
-                enhanced_method_info = json.loads(json.dumps(method_info))
-
-                # Add target chain based on method
-                if method == "bioemu":
-                    # BioEmu always uses chain A
-                    enhanced_method_info["target_chain"] = "A"
-                else:
-                    # For other methods, try to extract yaml_tag from pattern
-                    pattern = method_info.get("pattern", "")
-                    yaml_tag = extract_yaml_tag_from_pattern(pattern)
-                    path_method_type = (
-                        extract_method_type_from_pattern(pattern) or set_name
-                    )
-
-                    if yaml_tag:
-                        enhanced_method_info["yaml_tag"] = yaml_tag
-                        enhanced_method_info["reference_cif_path"] = (
-                            get_reference_cif_path(yaml_tag)
-                        )
-
-                        target_chain = get_target_chain_for_method(
-                            method, yaml_tag, path_method_type, cluster_id, set_name
-                        )
-                        enhanced_method_info["target_chain"] = target_chain
-
-                        # Add distogram pattern when configured (silently skipped otherwise).
-                        if method in ("af3", "boltz1", "boltz2"):
-                            pattern = get_distogram_path_pattern(
-                                method, path_method_type, cluster_id, yaml_tag
-                            )
-                            if pattern:
-                                enhanced_method_info["distogram_pattern"] = pattern
-
-                            if method == "af3" and af3_chain_json:
-                                af3_mapping = get_chain_mapping(
-                                    cluster_id,
-                                    yaml_tag,
-                                    set_name,
-                                    af3_chain_json,
-                                )
-                                if af3_mapping:
-                                    enhanced_method_info["chain_mapping"] = af3_mapping
-                            elif method == "boltz2" and boltz_chain_json:
-                                boltz_mapping = get_chain_mapping(
-                                    cluster_id,
-                                    yaml_tag,
-                                    set_name,
-                                    boltz_chain_json,
-                                )
-                                if boltz_mapping:
-                                    enhanced_method_info["chain_mapping"] = (
-                                        boltz_mapping
-                                    )
-                            elif method == "boltz1" and boltz1_chain_json:
-                                boltz1_mapping = get_chain_mapping(
-                                    cluster_id,
-                                    yaml_tag,
-                                    set_name,
-                                    boltz1_chain_json,
-                                )
-                                if boltz1_mapping:
-                                    enhanced_method_info["chain_mapping"] = (
-                                        boltz1_mapping
-                                    )
-                    else:
-                        raise click.ClickException(
-                            f"Could not extract yaml_tag from pattern for {method} "
-                            f"in holo_predictions/{conformation} (cluster {cluster_id}): {pattern!r}"
-                        )
-
-                enhanced_conformation_data[method] = enhanced_method_info
-
-            enhanced_data["holo_predictions"][conformation] = enhanced_conformation_data
+            enhanced_data["holo_predictions"][conformation] = _enhance_prediction_methods(
+                conformation_data,
+                method_label=f"holo_predictions/{conformation}",
+                cluster_id=cluster_id,
+                set_name=set_name,
+                af3_chain_json=af3_chain_json,
+                boltz_chain_json=boltz_chain_json,
+                boltz1_chain_json=boltz1_chain_json,
+                default_yaml_tag=conformation,
+                enrich_methods=enrich_methods,
+            )
 
     return enhanced_data
+
+
+def _enhance_prediction_methods(
+    conformation_data: Dict[str, dict],
+    *,
+    method_label: str,
+    cluster_id: str,
+    set_name: str,
+    af3_chain_json: str,
+    boltz_chain_json: str,
+    boltz1_chain_json: str,
+    default_yaml_tag: str,
+    enrich_methods: Optional[Set[str]] = None,
+) -> Dict[str, dict]:
+    enhanced_conformation_data: Dict[str, dict] = {}
+    for method, method_info in conformation_data.items():
+        enhanced_method_info = json.loads(json.dumps(method_info))
+        if enrich_methods is not None and method not in enrich_methods:
+            enhanced_conformation_data[method] = enhanced_method_info
+            continue
+
+        if method == "bioemu":
+            enhanced_method_info["target_chain"] = "A"
+            pattern = get_distogram_path_pattern(
+                method, set_name, cluster_id, yaml_tag=""
+            )
+            if pattern:
+                enhanced_method_info["distogram_pattern"] = pattern
+        else:
+            pattern = method_info.get("pattern", "")
+            disk_yaml_tag = (
+                extract_yaml_tag_from_pattern(pattern)
+                or method_info.get("yaml_tag")
+                or default_yaml_tag
+            )
+            canonical_yaml_tag = (
+                method_info.get("canonical_yaml_tag") or default_yaml_tag
+            )
+            lookup_yaml_tag = canonical_yaml_tag or disk_yaml_tag
+            path_method_type = extract_method_type_from_pattern(pattern) or set_name
+            chain_yaml_tag = disk_yaml_tag
+            reference_yaml_tag = lookup_yaml_tag
+
+            if disk_yaml_tag:
+                enhanced_method_info["yaml_tag"] = disk_yaml_tag
+                if canonical_yaml_tag and canonical_yaml_tag != disk_yaml_tag:
+                    enhanced_method_info["canonical_yaml_tag"] = canonical_yaml_tag
+                enhanced_method_info["reference_cif_path"] = get_reference_cif_path(
+                    reference_yaml_tag
+                )
+                enhanced_method_info["target_chain"] = get_target_chain_for_method(
+                    method, chain_yaml_tag, path_method_type, cluster_id, set_name
+                )
+                if method in ("af3", "boltz1", "boltz2"):
+                    disto_pat = get_distogram_path_pattern(
+                        method, path_method_type, cluster_id, disk_yaml_tag
+                    )
+                    if disto_pat:
+                        enhanced_method_info["distogram_pattern"] = disto_pat
+                    if method == "af3" and af3_chain_json:
+                        af3_mapping = get_chain_mapping(
+                            cluster_id, chain_yaml_tag, set_name, af3_chain_json
+                        )
+                        if af3_mapping:
+                            enhanced_method_info["chain_mapping"] = af3_mapping
+                    elif method == "boltz2" and boltz_chain_json:
+                        boltz_mapping = get_chain_mapping(
+                            cluster_id, chain_yaml_tag, set_name, boltz_chain_json
+                        )
+                        if boltz_mapping:
+                            enhanced_method_info["chain_mapping"] = boltz_mapping
+                    elif method == "boltz1" and boltz1_chain_json:
+                        boltz1_mapping = get_chain_mapping(
+                            cluster_id, chain_yaml_tag, set_name, boltz1_chain_json
+                        )
+                        if boltz1_mapping:
+                            enhanced_method_info["chain_mapping"] = boltz1_mapping
+            else:
+                raise click.ClickException(
+                    f"Could not extract yaml_tag from pattern for {method} "
+                    f"in {method_label} (cluster {cluster_id}): {pattern!r}"
+                )
+
+        enhanced_conformation_data[method] = enhanced_method_info
+    return enhanced_conformation_data
 
 
 def enrich_seq_cluster_map(
     seq_cluster_data: Dict[str, Any],
     representative_sequences: Dict[str, Any],
+    enrich_methods: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """
     Enrich every cluster in a seq_cluster_to_answer_map (e.g. from make_pairs).
     The dynamics set is keyed ``intrinsic`` in the map and in
     ``distogram_enrich`` path templates.
+
+  When ``enrich_methods`` is set, only those prediction methods get
+  ``target_chain`` / distogram / chain-mapping fields; other methods keep
+  their existing per-method dicts unchanged.
     """
     enhanced_data: Dict[str, Any] = {}
     for set_name, clusters in seq_cluster_data.items():
         enhanced_data[set_name] = {}
         for cluster_id, cluster_data in clusters.items():
             enhanced_data[set_name][cluster_id] = enhance_cluster_data(
-                cluster_id, cluster_data, set_name, representative_sequences
+                cluster_id,
+                cluster_data,
+                set_name,
+                representative_sequences,
+                enrich_methods=enrich_methods,
             )
     return enhanced_data
 
@@ -916,7 +1089,14 @@ def enrich_seq_cluster_map(
     default=False,
     help="Skip MSA/CIF/distogram/chain enrichment (prediction globs only).",
 )
-def main(csv_dir, clusters_json, examples_dir, outdir, skip_enrichment):
+@click.option(
+    "--enrich-methods",
+    type=str,
+    default=None,
+    help="Comma-separated prediction methods to enrich (e.g. boltz2). "
+    "Default: all methods with predictions.",
+)
+def main(csv_dir, clusters_json, examples_dir, outdir, skip_enrichment, enrich_methods):
     """Generate seq_cluster_to_answer_map.json and valid_pairs.json"""
     csv_dir = Path(csv_dir)
     clusters_json = Path(clusters_json)
@@ -950,6 +1130,23 @@ def main(csv_dir, clusters_json, examples_dir, outdir, skip_enrichment):
     data = filter_data(data, valid_centers)
     for set_name in SET_NAMES:
         click.echo(f"  {set_name}: {len(data.get(set_name, {}))} clusters")
+
+    # 3b. Valid pairs from CSV rows only; trim clusters/tags to pair scope
+    click.echo("\n[3b] Building valid pairs from CSV rows...")
+    valid_pairs = build_valid_pairs_from_csv(csv_dir, data)
+    data = restrict_to_valid_pairs(data, valid_pairs, csv_dir)
+    valid_pairs = {
+        set_name: {
+            cluster: pairs
+            for cluster, pairs in valid_pairs.get(set_name, {}).items()
+            if cluster in data.get(set_name, {})
+        }
+        for set_name in SET_NAMES
+    }
+    for set_name in SET_NAMES:
+        n_cl = len(data.get(set_name, {}))
+        n_pairs = sum(len(v) for v in valid_pairs.get(set_name, {}).values())
+        click.echo(f"  {set_name}: {n_cl} clusters, {n_pairs} CSV pairs")
     
     # 4. Add predictions
     click.echo("\n[4] Adding prediction paths...")
@@ -959,7 +1156,10 @@ def main(csv_dir, clusters_json, examples_dir, outdir, skip_enrichment):
         model_counts = defaultdict(int)
         for clusters in data.values():
             for info in clusters.values():
-                for model in info.get("apo_predictions", {}):
+                models_in_cluster: Set[str] = set()
+                for tag_preds in (info.get("apo_predictions") or {}).values():
+                    models_in_cluster.update(tag_preds.keys())
+                for model in models_in_cluster:
                     model_counts[model] += 1
         for model, count in sorted(model_counts.items()):
             click.echo(f"    {model}: {count} clusters with predictions")
@@ -975,24 +1175,26 @@ def main(csv_dir, clusters_json, examples_dir, outdir, skip_enrichment):
             "Enrichment requires pipeline.files.rep_seq in config to point to an existing JSON file."
         )
     else:
-        click.echo("\n[4b] Enriching seq_cluster_to_answer_map (MSA, CIF, distogram, chains)...")
+        enrich_method_set: Optional[Set[str]] = None
+        if enrich_methods:
+            enrich_method_set = {m.strip() for m in enrich_methods.split(",") if m.strip()}
+            click.echo(
+                f"\n[4b] Enriching seq_cluster_to_answer_map "
+                f"(methods: {', '.join(sorted(enrich_method_set))})..."
+            )
+        else:
+            click.echo("\n[4b] Enriching seq_cluster_to_answer_map (MSA, CIF, distogram, chains)...")
         with open(rep_path) as fh:
             rep_data = json.load(fh)
-        data = enrich_seq_cluster_map(data, rep_data)
+        data = enrich_seq_cluster_map(data, rep_data, enrich_methods=enrich_method_set)
         click.echo("  Enrichment done.")
 
-    # 5. Generate valid pairs
-    click.echo("\n[5] Generating valid pairs...")
-    csv_pairs = {
-        "intrinsic": load_csv_pairs(csv_dir / "intrinsic.csv"),
-        "protein-induced": load_csv_pairs(csv_dir / "protein-induced.csv"),
-        "ligand-induced": load_csv_pairs(csv_dir / "ligand-induced.csv"),
-    }
-    
-    valid_pairs = generate_valid_pairs(data, csv_pairs)
+    # 5. Summary (valid_pairs already built from CSV in step 3b)
+    click.echo("\n[5] Valid pairs (from CSV)...")
     for set_name in SET_NAMES:
+        n_cl = len(valid_pairs.get(set_name, {}))
         total = sum(len(v) for v in valid_pairs.get(set_name, {}).values())
-        click.echo(f"  {set_name}: {len(valid_pairs.get(set_name, {}))} clusters, {total} pairs")
+        click.echo(f"  {set_name}: {n_cl} clusters, {total} pairs")
     
     # 6. Save outputs
     click.echo("\n[6] Saving...")
