@@ -76,36 +76,9 @@ Pre-computed outputs downloaded (`data.tar.gz`) should be unzipped under `data/`
 
 ## Evaluation
 
-### Preference Scores
-Pre-computed preference scores (`data/preference_scores.json`) for each prediction model across all conformational pairs. This file aggregates multiple evaluation metrics to assess how well each model captures the holo (target) conformation.
+### Bias scores
 
-**Structure:**
-```
-{model} → {category} → {cluster_id} → {pair_id} → {scores}
-```
-
-- **Models**: `af3`, `boltz1`, `boltz2`, `chai`, `bioemu`
-- **Categories**: `intrinsic`, `ligand-induced`, `protein-induced`
-- **Cluster ID**: Sequence cluster identifier (e.g., `8ABP_1`)
-- **Pair ID**: Conformational pair identifier in format `{pdb1}_{asm1}_{chain1}-{pdb2}_{asm2}_{chain2}`
-  - Example: `2wrz_2_B1-2wrz_1_A1` represents conformer 1 (PDB: 2wrz, assembly: 2, chain: B1) vs conformer 2 (PDB: 2wrz, assembly: 1, chain: A1) 
-
-**Score Fields:**
-
-| Field | Description |
-|-------|-------------|
-| `msa_holo` | MSA-based preference score toward holo conformation (sum of per-residue preferences) |
-| `rmsd_conf1_conf2` | RMSD (Å) between the two reference conformations |
-| `struct_holo` | Structure-based (ConfBench) preference score toward holo conformation |
-| `disto_holo` | Distogram-based preference score toward holo conformation |
-| `dyndisto_holo` | Dynamic distogram-based preference score toward holo conformation |
-| `bias_entry1_hits` | Number of PDB training set hits for entry 1 |
-| `bias_entry2_hits` | Number of PDB training set hits for entry 2 |
-| `train_holo` | Training data bias toward holo conformation (ratio difference of training hits) |
-| `after_training_cutoff` | Whether the pair entries are deposited after the model's training cutoff date |
-
-Positive values of `msa_holo`, `struct_holo`, `disto_holo`, and `dyndisto_holo` indicate a preference toward the holo conformation, while negative values indicate a preference toward the apo conformation. `train_holo` quantifies preference of the training data.
-
+Per-pair metrics for all models live in `data/bias_score.json` (see [src/eval/README.md](src/eval/README.md)). ConfBench, MSA bias, and training bias are combined there for analysis and plotting.
 
 ## Contributing
 

@@ -24,23 +24,6 @@ promise_eval steps
 
 Equivalent shell wrappers: `scripts/eval_pipeline_run.sh` (P1–P4; P3/P4 skipped by default).
 
----
-
-## Pipelines and steps
-
-| Pipeline | Steps | Main outputs |
-|----------|-------|--------------|
-| **1 — Struct ConfBench** | `make_pairs` → `distogram_prep` → `alignment` → `ref_metrics` → `struct_confbench` | `data_eval/confbench_scores_{model}.json` |
-| **2 — Distogram ConfBench** | `ref_distogram_diff` → `distogram_loss` → `distogram_confbench` | `data_eval/confbench_scores_distogram_{model}.json` |
-| **3 — MSA bias** | `msa_renumbered_pdbs` → `msa_esm_contacts` → `msa_bias` → `msa_summary` | `data_eval/per_pair_summary.csv` |
-| **4 — Training bias** | `train_foldseek_hits` → `train_mmseqs_hits` → `train_intersection` → `train_bias` | `training_bias_per_pair_{model}.json` under `data_eval/train/training_bias/` |
-
-`make_pairs` writes `data/dataset/valid_pairs.json` and `seq_cluster_to_answer_map.json` (MSA paths, reference CIFs, chains, distogram patterns).
-
-Slice a run with `--start-from` / `--stop-after` (step names from `promise_eval steps`).
-
----
-
 ## Prerequisites
 
 | Requirement | Used by |
@@ -69,18 +52,51 @@ Use individual modules when you need finer control (Slurm sharding, partial reru
 
 Alignment and distogram prep can run in parallel after `make_pairs`. Distogram loss/ref-diff/confbench are sequential.
 
-Optional: `eval.merge_all` merges struct + distogram ConfBench + MSA + training bias into `preference_scores.json`.
-
 ---
 
-## Module index
+## `bias_score.json`
 
-| Area | Key modules |
-|------|-------------|
-| Orchestration | `eval/run.py` (`promise_eval`) |
-| Alignment | `align/generate_alignment_tasks`, `split_alignment_jobs`, `struct_align_batch` |
-| Struct | `struct/calc_reference_structural_metrics`, `calc_confbench_score_valid_pairs` |
-| Distogram | `distogram/extract_reference_cb`, `collect_distograms`, `calc_*`, `check_*`, `generate_*_jobs` |
-| MSA | `msa/cif_to_renumbered_pdb`, `esm_run`, `msa_bias`, `summarize_msa_bias` |
-| Train | `train/collect_memorization_hits_foldseek`, `collect_memorization_hits_mmseqs`, `create_intersection_hits`, `calculate_training_bias_per_pair_weighted` |
-| Merge | `merge_all.py`, `update_preference_scores.py` |
+Canonical aggregate at `data/bias_score.json` (flat `data/bias_score.csv` alongside). Nested dict: `model → set → cluster → pair`:
+
+```
+{model}/{set}/{cluster_id}/{conf1-conf2} → {metric: value}
+```
+
+Models: `alphafold3`, `boltz1`, `boltz2`, `chai`, `bioemu`. Sets: `apo-monomers`, `ligand-induced`, `protein-induced` (`apo-monomers` = intrinsic dynamics).
+
+| Field | Source | Set type |
+|-------|--------|----------|
+| `confbench_mean` | Pipeline 1 | apo-monomers |
+| `confbench_apo_pred`, `confbench_holo_pred` | Pipeline 1 | induced |
+| `distogram_confbench`, `distogram_dynamic_confbench` | Pipeline 2 | apo-monomers |
+| `distogram_confbench_apo/holo`, `distogram_dynamic_confbench_apo/holo` | Pipeline 2 | induced |
+| `msa_pref_sum`, `msa_pref_avg`, … | Pipeline 3 | all |
+| `bias_ratio_diff`, `bias_entry*_hits` | Pipeline 4 | all |
+| `rmsd_conf1_conf2` | Reference metrics | all |
+| `after_training_cutoff` | Cutoff filter | all |
+
+Full rebuild:
+
+```bash
+python -m eval.merge_all \
+  --valid-pairs-json data/dataset/valid_pairs.json \
+  --confbench-json data_eval/confbench_scores_boltz2.json \
+  --confbench-distogram-json data_eval/confbench_scores_distogram_boltz2.json \
+  --msa-pref-csv data_eval/per_pair_summary.csv \
+  --training-bias-dir data_eval/train/training_bias
+```
+
+Defaults write `data/bias_score.json` and `data/bias_score.csv` (`eval.files.bias_score` in config).
+
+Patch one model’s struct + distogram ConfBench after a re-run (other fields unchanged):
+
+```bash
+python -m eval.update_merged_confbench \
+  --bias-score-json data/bias_score.json \
+  --struct-confbench-json data_eval/confbench_scores_boltz2.json \
+  --distogram-confbench-json data_eval/confbench_scores_distogram_boltz2.json \
+  --model boltz2
+```
+
+Training bias only: `python -m eval.train.update_merged_bias_ratio_diff`.
+

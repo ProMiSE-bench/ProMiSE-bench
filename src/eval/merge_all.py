@@ -10,10 +10,10 @@ Inputs (all configurable via CLI options):
   --training-bias-dir         Directory of per-model training bias JSONs (tm_0.9_fident_0.8)
   --survived-clusters-json    Training cutoff survival flags (survived_clusters_threshold60.json)
 
-Outputs (written to --output-dir):
-  merged_valid_pairs_data.json
+Outputs (written to configured paths, default ``data/bias_score.json``):
+  bias_score.json
       {model: {set_name: {cluster_id: {pair_key: {metric: value, ...}}}}}
-  merged_valid_pairs_data.csv
+  bias_score.csv
       Flat table with columns: model, set_name, cluster_id, conf1_name, conf2_name,
       msa_pref_sum, msa_pref_avg, same_sign_sum_avg, over_coverage_0.1,
       rmsd_conf1_conf2, confbench_mean (intrinsic) /
@@ -25,6 +25,7 @@ Outputs (written to --output-dir):
 
 import os
 import json
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import click
@@ -450,19 +451,18 @@ def merge_all_data(valid_pairs_json, confbench_json, confbench_distogram_json,
     return json_output, csv_rows
 
 
-def save_outputs(json_output, csv_rows, output_dir):
+def save_outputs(json_output, csv_rows, json_path, csv_path):
     """Save JSON and CSV outputs."""
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Save JSON
-    json_path = os.path.join(output_dir, 'merged_valid_pairs_data.json')
+    json_path = Path(json_path)
+    csv_path = Path(csv_path)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
     with open(json_path, 'w') as f:
         json.dump(json_output, f, indent=2)
     print(f"\nSaved JSON: {json_path}")
-    
-    # Save CSV
+
     df = pd.DataFrame(csv_rows)
-    csv_path = os.path.join(output_dir, 'merged_valid_pairs_data.csv')
     df.to_csv(csv_path, index=False)
     print(f"Saved CSV: {csv_path}")
     
@@ -495,11 +495,15 @@ def save_outputs(json_output, csv_rows, output_dir):
 @click.option('--survived-clusters-json', type=click.Path(exists=True),
               default=str(E.file('survived_clusters')),
               show_default=True, help='Path to survived_clusters_threshold60.json')
-@click.option('--output-dir', type=click.Path(),
-              default=str(E.dir('output')),
-              show_default=True, help='Output directory for merged results')
+@click.option('--output-json', type=click.Path(),
+              default=str(E.file('bias_score')),
+              show_default=True, help='Output JSON path (default: data/bias_score.json)')
+@click.option('--output-csv', type=click.Path(),
+              default=str(E.file('bias_score_csv')),
+              show_default=True, help='Output CSV path (default: data/bias_score.csv)')
 def main(valid_pairs_json, confbench_json, confbench_distogram_json,
-         msa_pref_csv, training_bias_dir, survived_clusters_json, output_dir):
+         msa_pref_csv, training_bias_dir, survived_clusters_json,
+         output_json, output_csv):
     print("=" * 80)
     print("MERGE ALL VALID PAIR DATA (v3 - With Distogram ConfBench Scores)")
     print("=" * 80)
@@ -508,7 +512,7 @@ def main(valid_pairs_json, confbench_json, confbench_distogram_json,
         valid_pairs_json, confbench_json, confbench_distogram_json,
         msa_pref_csv, training_bias_dir, survived_clusters_json
     )
-    df = save_outputs(json_output, csv_rows, output_dir)
+    df = save_outputs(json_output, csv_rows, output_json, output_csv)
     
     # Quick stats
     print("\n" + "=" * 80)
