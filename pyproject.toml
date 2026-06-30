@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promise-data"
+version = "0.1.0"
+description = "Data curation pipeline for promise-bench"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "click",
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "joblib",
+    "tqdm",
+    "biopython",
+    "gemmi",
+    "pydantic",
+    "matplotlib",
+    "parasail",
+    "nurikit",
+    "pyyaml",
+    "torch",
+    "psutil",
+]
+
+[project.scripts]
+promise_data = "curation.run:promise_data"
+promise_eval = "eval.run:promise_eval"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
+exclude = ["*.egg-info", "*_egg_info*"]
+
+[tool.setuptools.package-data]
+"eval" = ["README.md"]
