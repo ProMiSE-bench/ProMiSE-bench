@@ -367,6 +367,21 @@ def _process_cluster(
                 return False
         return True
 
+    def _mismatch_detail(cand: EntryInfo, other: EntryInfo) -> str:
+        """Return a description of which binding-site residues mismatch."""
+        if not other.has_binding_site:
+            return ""
+        parts: list[str] = []
+        cand_seq = cand.aligned_seq
+        for col, aa in sorted(other.bs_col_aa.items()):
+            if col >= len(cand_seq):
+                parts.append(f"col{col}({aa}->OOB)")
+            elif cand_seq[col] == "-":
+                parts.append(f"col{col}({aa}->gap)")
+            elif cand_seq[col] != aa:
+                parts.append(f"col{col}({aa}->{cand_seq[col]})")
+        return ";".join(parts)
+
     best_cand: Optional[EntryInfo] = None
     best_support = -1
 
@@ -407,6 +422,7 @@ def _process_cluster(
             compat_keys.add(key)
         else:
             incompat_keys.add(key)
+        reason = "" if ok else f"bs_mismatch:{_mismatch_detail(best_cand, e)}"
         compat_rows.append(
             {
                 "cluster": cluster_stem,
@@ -414,7 +430,7 @@ def _process_cluster(
                 "asm": e.asm,
                 "chain": e.chain_letter,
                 "compatible": ok,
-                "reason": "" if ok else "bs_mismatch",
+                "reason": reason,
             }
         )
 
@@ -436,7 +452,7 @@ def _clean(val: str) -> str:
     return "" if v in ("", "nan", "NaN", "None", "NONE") else v
 
 
-def _collect_entries(dataset_dir: Path) -> Dict[str, List[dict]]:
+def _collect_entries(csv_paths: List[Path]) -> Dict[str, List[dict]]:
     """Read all pair CSVs and return {cluster_stem: [entry_dict, ...]}.
 
     Each entry_dict has keys: pdb, asm, chain, contact_chains, contact_ligands.
@@ -444,7 +460,7 @@ def _collect_entries(dataset_dir: Path) -> Dict[str, List[dict]]:
     """
     cluster_entries: Dict[str, Dict[str, dict]] = defaultdict(dict)
 
-    for csv_path in sorted(dataset_dir.glob("*.csv")):
+    for csv_path in csv_paths:
         try:
             pairs = DatasetPair.load_csv(csv_path)
         except Exception:
@@ -493,11 +509,11 @@ def _collect_entries(dataset_dir: Path) -> Dict[str, List[dict]]:
     cls=DataRootCommand, context_settings={"help_option_names": ["-h", "--help"]}
 )
 @click.option(
-    "--dataset-dir",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=C.dir("combinations"),
-    show_default=True,
-    help="Directory with pair CSVs (curate_sets output).",
+    "--dataset-csv",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    multiple=True,
+    required=True,
+    help="Pair CSV file(s) to process (repeatable).",
 )
 @click.option(
     "--msa-root",
@@ -539,7 +555,7 @@ def _collect_entries(dataset_dir: Path) -> Dict[str, List[dict]]:
     "--workers", "-j", type=int, default=8, show_default=True, help="Parallel workers."
 )
 def main(
-    dataset_dir: Path,
+    dataset_csv: Tuple[Path, ...],
     msa_root: Path,
     cif_root: Path,
     out_json: Path,
@@ -549,9 +565,11 @@ def main(
 ):
     """Select representative sequences based on binding-site compatibility."""
 
+    csv_paths = list(dataset_csv)
+
     # 1. Collect unique entries per cluster from pair CSVs
-    click.echo(f"Scanning pair CSVs in {dataset_dir} ...")
-    cluster_entries = _collect_entries(dataset_dir)
+    click.echo(f"Scanning {len(csv_paths)} pair CSV(s) ...")
+    cluster_entries = _collect_entries(csv_paths)
     n_entries = sum(len(v) for v in cluster_entries.values())
     click.echo(
         f"Found {n_entries} unique entries across {len(cluster_entries)} clusters"
@@ -610,7 +628,7 @@ def main(
     # 6. Filter pair CSVs — drop pairs involving incompatible entries
     out_dataset.mkdir(parents=True, exist_ok=True)
 
-    for ds in sorted(dataset_dir.glob("*.csv")):
+    for ds in csv_paths:
         try:
             pairs = DatasetPair.load_csv(ds)
         except Exception:

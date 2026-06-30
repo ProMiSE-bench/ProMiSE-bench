@@ -6,11 +6,14 @@ Convert CIF files to renumbered PDB based on MSA alignment.
 Residue numbers are assigned based on representative sequence position.
 
 Usage:
-    # Process all CIF files in examples/targets
-    python -m src.eval.cif_to_renumbered_pdb --targets-dir examples/targets
+    # Full dataset (data/cif-asms + answer map reference paths)
+    python -m eval.msa.cif_to_renumbered_pdb
 
-    # Process specific CIF file
-    python -m src.eval.cif_to_renumbered_pdb --input examples/targets/intrinsic/7OYW_1/asm_6yeb_1.cif --cluster 7OYW_1 --set intrinsic
+    # Legacy examples/targets layout
+    python -m eval.msa.cif_to_renumbered_pdb --targets-dir examples/targets
+
+    # Single cluster
+    python -m eval.msa.cif_to_renumbered_pdb --cluster 7OYW_1 --set intrinsic
 """
 
 import os
@@ -26,6 +29,8 @@ from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 
 from utils._config import pipeline_cfg as C
 from utils._config import eval_cfg as E
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 AA_3TO1 = {
     'ALA': 'A', 'CYS': 'C', 'ASP': 'D', 'GLU': 'E', 'PHE': 'F',
@@ -326,16 +331,74 @@ def cif_to_renumbered_pdb(
 # Main Processing
 # ============================================================================
 
-def parse_answer_tag(tag: str) -> Tuple[str, str, str]:
-    """
-    Parse answer tag like '6yeb_1_A1_conf_0'.
-    Returns (pdb_id, asm_num, auth_asym_id)
-    """
-    parts = tag.split('_')
-    pdb_id = parts[0]
-    asm_num = parts[1]
-    auth_asym_id = parts[2]
-    return pdb_id, asm_num, auth_asym_id
+def _strip_state_suffix(tag: str) -> str:
+    if len(tag) >= 2 and tag[-2] == "_" and tag[-1] in "mx":
+        return tag[:-2]
+    return tag
+
+
+def _a3m_path_for_cluster(msa_dir: Path, cluster_id: str) -> Path:
+    cid = str(cluster_id).upper()
+    sub = str(cluster_id)[1:3].upper()
+    return msa_dir / sub / f"{cid}.a3m"
+
+
+def _resolve_repo_path(path_str: str) -> Optional[Path]:
+    p = Path(path_str)
+    if p.is_absolute() and p.exists():
+        return p
+    for base in (_REPO_ROOT, Path.cwd()):
+        candidate = base / p
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _find_reference_cif(yaml_tag: str, cif_root: Path) -> Optional[Path]:
+    tag = _strip_state_suffix(yaml_tag)
+    parts = tag.split("_")
+    if len(parts) < 2:
+        return None
+    pdb_id, asm_num = parts[0], parts[1]
+    mid = pdb_id[1:3].upper()
+    cif_file = cif_root / mid / pdb_id.upper() / f"asm_{pdb_id.lower()}_{asm_num}.cif"
+    return cif_file if cif_file.exists() else None
+
+
+def parse_yaml_tag(tag: str) -> Tuple[str, str, str]:
+    """Parse yaml/conf tag like ``6yeb_1_A1_m`` or ``6yeb_1_A1_conf_0``."""
+    tag = _strip_state_suffix(tag)
+    parts = tag.split("_")
+    return parts[0], parts[1], parts[2]
+
+
+def resolve_reference_cif(
+    yaml_tag: str,
+    cluster_data: dict,
+    cif_dir: Path,
+    targets_dir: Optional[str],
+    set_name: str,
+    cluster_id: str,
+) -> Optional[Path]:
+    for refs_key in ("apo_references", "holo_references"):
+        ref = cluster_data.get(refs_key, {}).get(yaml_tag, {})
+        path_str = ref.get("reference_cif_path")
+        if path_str:
+            resolved = _resolve_repo_path(path_str)
+            if resolved is not None:
+                return resolved
+
+    found = _find_reference_cif(yaml_tag, cif_dir)
+    if found is not None:
+        return found
+
+    if not targets_dir:
+        return None
+
+    pdb_id, _, _ = parse_yaml_tag(yaml_tag)
+    cluster_dir = Path(targets_dir) / set_name / cluster_id
+    matches = list(cluster_dir.glob(f"asm_{pdb_id}_*.cif"))
+    return matches[0] if matches else None
 
 
 def get_msa_tag(pdb_id: str, auth_asym_id: str) -> str:
@@ -351,11 +414,12 @@ def get_msa_tag(pdb_id: str, auth_asym_id: str) -> str:
 def process_cluster(
     cluster_id: str,
     set_name: str,
-    targets_dir: str,
-    msa_dir: str,
+    targets_dir: Optional[str],
+    cif_dir: Path,
+    msa_dir: Path,
     rep_seq_data: Dict,
     answer_map_data: Dict,
-    output_dir: str
+    output_dir: str,
 ) -> Dict[str, bool]:
     """
     Process all CIF files for a cluster.
@@ -384,7 +448,7 @@ def process_cluster(
     print(f"  Rep header: {rep_header}")
     
     # Load MSA
-    msa_path = Path(msa_dir) / f"{cluster_id}.a3m"
+    msa_path = _a3m_path_for_cluster(msa_dir, cluster_id)
     if not msa_path.exists():
         print(f"  ERROR: MSA not found: {msa_path}")
         return results
@@ -398,29 +462,31 @@ def process_cluster(
         print(f"  ERROR: Rep header '{rep_header}' not found in MSA")
         return results
     
-    # Process apo and holo targets
-    all_tags = cluster_data.get('apo', []) + cluster_data.get('holo', [])
-    
+    # Process apo/holo yaml tags (matches valid_pairs / msa_bias naming)
+    all_tags = list(dict.fromkeys(
+        cluster_data.get("apo_tags", []) + cluster_data.get("holo_tags", [])
+    ))
+    if not all_tags:
+        all_tags = cluster_data.get("apo", []) + cluster_data.get("holo", [])
+
     for tag in all_tags:
-        pdb_id, asm_num, auth_asym_id = parse_answer_tag(tag)
+        pdb_id, asm_num, auth_asym_id = parse_yaml_tag(tag)
         msa_tag = get_msa_tag(pdb_id, auth_asym_id)
-        
+
         print(f"\n  Processing: {tag}")
         print(f"    PDB: {pdb_id}, ASM: {asm_num}, Auth: {auth_asym_id}")
         print(f"    MSA tag: {msa_tag}")
-        
-        # Find CIF file - search by pdb_id since asm_num might differ
-        cluster_dir = Path(targets_dir) / set_name / cluster_id
-        cif_files = list(cluster_dir.glob(f"asm_{pdb_id}_*.cif"))
-        
-        if not cif_files:
-            print(f"    ERROR: No CIF found for pdb_id={pdb_id} in {cluster_dir}")
-            results[f"asm_{pdb_id}_*.cif"] = False
+
+        cif_path = resolve_reference_cif(
+            tag, cluster_data, cif_dir, targets_dir, set_name, cluster_id
+        )
+        if cif_path is None:
+            print(f"    ERROR: No CIF found for tag={tag}")
+            results[tag] = False
             continue
-        
-        cif_path = cif_files[0]  # Use first match
-        actual_asm_num = cif_path.stem.split('_')[2]  # Get actual asm_num from filename
-        print(f"    Using CIF: {cif_path.name}")
+
+        actual_asm_num = cif_path.stem.split("_")[2]
+        print(f"    Using CIF: {cif_path}")
         
         # Get target aligned sequence from MSA
         target_aligned = msa_sequences.get(msa_tag)
@@ -434,7 +500,7 @@ def process_cluster(
         if target_aligned is None:
             print(f"    ERROR: MSA tag '{msa_tag}' not found in MSA")
             print(f"    Available: {list(msa_sequences.keys())[:5]}...")
-            results[cif_pattern] = False
+            results[tag] = False
             continue
         
         # Create renumber mapping
@@ -444,7 +510,7 @@ def process_cluster(
             print(f"    Mapping: {len(renumber_mapping)} positions, {mapped_count} mapped")
         except Exception as e:
             print(f"    ERROR creating mapping: {e}")
-            results[cif_pattern] = False
+            results[tag] = False
             continue
         
         # Output path - use actual asm_num from CIF filename
@@ -456,16 +522,26 @@ def process_cluster(
                 str(cif_path),
                 str(output_pdb),
                 auth_asym_id,
-                renumber_mapping
+                renumber_mapping,
             )
-            results[cif_path.name] = success
+            results[tag] = success
             if success:
                 print(f"    Saved: {output_pdb.name}")
         except Exception as e:
             print(f"    ERROR: {e}")
-            results[cif_path.name] = False
-    
+            results[tag] = False
+
     return results
+
+
+def discover_clusters_from_answer_map(answer_map_data: Dict) -> List[Tuple[str, str]]:
+    clusters: List[Tuple[str, str]] = []
+    for set_name, cluster_dict in answer_map_data.items():
+        if not isinstance(cluster_dict, dict):
+            continue
+        for cluster_id in cluster_dict:
+            clusters.append((set_name, cluster_id))
+    return sorted(clusters)
 
 
 def discover_clusters(targets_dir: str) -> List[Tuple[str, str]]:
@@ -495,32 +571,49 @@ def discover_clusters(targets_dir: str) -> List[Tuple[str, str]]:
 # ============================================================================
 
 @click.command()
-@click.option('--targets-dir', type=click.Path(exists=True), default=None,
-              help='examples/targets directory')
-@click.option('--input', '-i', 'input_cif', type=click.Path(exists=True), default=None,
-              help='Input CIF file')
-@click.option('--cluster', type=str, default=None,
-              help='Cluster ID (required with --input)')
-@click.option('--set', 'set_name', type=str, default=None,
-              help='Set name (required with --input)')
-@click.option('--output-dir', '-o', type=click.Path(),
-              default=str(E.dir('renumbered_pdbs')),
-              show_default=True, help='Output directory for renumbered PDBs')
-@click.option('--msa-dir', type=click.Path(exists=True),
-              default=str(C.dir('msas')),
-              show_default=True, help='MSA directory')
-@click.option('--rep-seq', type=click.Path(exists=True),
-              default=str(C.file('rep_seq')),
-              show_default=True, help='Path to rep_seq.json')
-@click.option('--answer-map', type=click.Path(exists=True),
-              default=str(C.file('answer_map')),
-              show_default=True, help='Path to answer_map.json')
-def main(targets_dir, input_cif, cluster, set_name, output_dir, msa_dir,
-         rep_seq, answer_map):
+@click.option(
+    "--targets-dir",
+    type=click.Path(exists=True),
+    default=None,
+    help="Legacy examples/targets layout ({set}/{cluster}/asm_*.cif)",
+)
+@click.option(
+    "--cif-dir",
+    type=click.Path(exists=True),
+    default=str(C.dir("cif_asms")),
+    show_default=True,
+    help="Reference CIF root (data/cif-asms)",
+)
+@click.option("--input", "-i", "input_cif", type=click.Path(exists=True), default=None,
+              help="Input CIF file (single-cluster mode)")
+@click.option("--cluster", type=str, default=None,
+              help="Cluster ID (single-cluster mode)")
+@click.option("--set", "set_name", type=str, default=None,
+              help="Set name: intrinsic | ligand-induced | protein-induced")
+@click.option("--output-dir", "-o", type=click.Path(),
+              default=str(E.dir("renumbered_pdbs")),
+              show_default=True, help="Output directory for renumbered PDBs")
+@click.option("--msa-dir", type=click.Path(exists=True),
+              default=str(C.dir("msas")),
+              show_default=True, help="MSA directory (data/msas)")
+@click.option("--rep-seq", type=click.Path(exists=True),
+              default=str(C.file("rep_seq")),
+              show_default=True, help="Path to rep_seq.json")
+@click.option("--answer-map", type=click.Path(exists=True),
+              default=str(C.file("answer_map")),
+              show_default=True, help="Path to answer_map.json")
+def main(
+    targets_dir,
+    cif_dir,
+    input_cif,
+    cluster,
+    set_name,
+    output_dir,
+    msa_dir,
+    rep_seq,
+    answer_map,
+):
     """CIF to Renumbered PDB Converter for ProMiSE-bench."""
-    if not targets_dir and not input_cif:
-        raise click.UsageError('One of --targets-dir or --input is required.')
-
     # Load data files
     print("Loading data files...")
 
@@ -533,27 +626,33 @@ def main(targets_dir, input_cif, cluster, set_name, output_dir, msa_dir,
     total_clusters = sum(len(v) for v in answer_map_data.values())
     print(f"  answer_map: {total_clusters} clusters")
 
+    cif_root = Path(cif_dir)
+    msa_root = Path(msa_dir)
+
     # Discover or use specified clusters
-    if targets_dir:
+    if cluster and set_name:
+        clusters = [(set_name, cluster)]
+    elif targets_dir:
         clusters = discover_clusters(targets_dir)
         print(f"\nFound {len(clusters)} clusters in {targets_dir}")
     else:
-        if not cluster or not set_name:
-            raise click.UsageError('--cluster and --set are required with --input.')
-        clusters = [(set_name, cluster)]
+        clusters = discover_clusters_from_answer_map(answer_map_data)
+        print(f"\nFound {len(clusters)} clusters in answer map")
+
+    if input_cif and not (cluster and set_name):
+        raise click.UsageError("--cluster and --set are required with --input.")
 
     # Process clusters
     success_total = 0
     fail_total = 0
 
     for sn, cid in clusters:
-        tdir = targets_dir if targets_dir else str(Path(input_cif).parent.parent.parent)
-
         results = process_cluster(
             cluster_id=cid,
             set_name=sn,
-            targets_dir=tdir,
-            msa_dir=msa_dir,
+            targets_dir=targets_dir,
+            cif_dir=cif_root,
+            msa_dir=msa_root,
             rep_seq_data=rep_seq_data,
             answer_map_data=answer_map_data,
             output_dir=output_dir,

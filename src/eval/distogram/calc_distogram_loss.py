@@ -409,7 +409,7 @@ def calc_distogram_loss_multi_dynamic(
     dynamic_entropies = {}
 
     for pair_key, dynamic_positions in all_dynamic_regions.items():
-        if method != 'apo-monomers':
+        if method != 'intrinsic':
             if reference_yaml_tag != prediction_yaml_tag:
                 if '_x' in reference_yaml_tag:
                     if pair_key[0] != reference_yaml_tag and pair_key[1] != reference_yaml_tag:
@@ -470,7 +470,7 @@ def calc_distogram_loss_multi_dynamic(
 
     if pair_to_common_seq_ids:
         for pair_key, pair_common_seq_ids in pair_to_common_seq_ids.items():
-            if method != 'apo-monomers':
+            if method != 'intrinsic':
                 if reference_yaml_tag != prediction_yaml_tag:
                     if '_x' in reference_yaml_tag:
                         if pair_key[0] != reference_yaml_tag and pair_key[1] != reference_yaml_tag:
@@ -765,7 +765,7 @@ def calc_expected_distance_error_multi_dynamic(
     n_aligned_dynamics = {}
 
     for pair_key, dynamic_positions in all_dynamic_regions.items():
-        if method_type != 'apo-monomers':
+        if method_type != 'intrinsic':
             if reference_yaml_tag != prediction_yaml_tag:
                 if '_x' in reference_yaml_tag:
                     if pair_key[0] != reference_yaml_tag and pair_key[1] != reference_yaml_tag:
@@ -820,7 +820,7 @@ def calc_expected_distance_error_multi_dynamic(
     if pair_to_common_seq_ids:
         for pair_key, pair_common_seq_ids in pair_to_common_seq_ids.items():
 
-            if method_type != 'apo-monomers':
+            if method_type != 'intrinsic':
                 if reference_yaml_tag != prediction_yaml_tag:
                     if '_x' in reference_yaml_tag:
                         if pair_key[0] != reference_yaml_tag and pair_key[1] != reference_yaml_tag:

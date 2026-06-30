@@ -11,8 +11,7 @@ Schema of one row (relevant fields)
 -----------------------------------
 - ``pair_type``: "intrinsic" | "ligand-induced" | "protein-induced"
 - ``cluster_id``: e.g. ``"4KBF_1"``
-- ``prediction_method``: dashed label, e.g. ``"boltz-1"`` (use
-  ``normalize_method`` -> ``"boltz1"``)
+- ``prediction_method``: e.g. ``"boltz1"``, ``"af3"``
 - ``mobile_cif``: prediction CIF path; uniquely identifies one
   (seed, sample) prediction
 - ``mobile_entity``: prediction yaml tag, e.g. ``"4kbg_2_B1_m"``
@@ -42,8 +41,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from ._common import normalize_method, normalize_set_type
-
 # ---------------------------------------------------------------------------
 # Type aliases
 # ---------------------------------------------------------------------------
@@ -72,18 +69,15 @@ def load_align_rows(
 ) -> List[Row]:
     """Load and concatenate rows from every ``align_part*.json`` under ``align_dir``.
 
-    All string-set filters are matched after normalisation (``intrinsic``,
-    dash-less method keys). ``ok_only`` drops rows with ``ok=False``
-    (alignment failures).
+    All string-set filters match raw ``pair_type`` / ``prediction_method``
+    values. ``ok_only`` drops rows with ``ok=False`` (alignment failures).
     """
     set_set: Optional[set] = set(set_filter) if set_filter is not None else None
     cluster_set: Optional[set] = (
         set(cluster_filter) if cluster_filter is not None else None
     )
     method_set: Optional[set] = (
-        set(normalize_method(m) for m in method_filter)
-        if method_filter is not None
-        else None
+        set(method_filter) if method_filter is not None else None
     )
 
     rows: List[Row] = []
@@ -98,19 +92,14 @@ def load_align_rows(
         for r in data:
             if ok_only and not r.get("ok"):
                 continue
-            pt = normalize_set_type(r.get("pair_type"))
+            pt = r.get("pair_type")
             if set_set is not None and pt not in set_set:
                 continue
             if cluster_set is not None and r.get("cluster_id") not in cluster_set:
                 continue
-            m_norm = normalize_method(r.get("prediction_method"))
-            if method_set is not None and m_norm not in method_set:
+            m = r.get("prediction_method")
+            if method_set is not None and m not in method_set:
                 continue
-            # Cache normalised fields back onto the row (cheap & convenient
-            # for downstream consumers); leave the original strings intact
-            # under their existing keys.
-            r["_set_type"] = pt
-            r["_method"] = m_norm
             rows.append(r)
     return rows
 
@@ -121,10 +110,10 @@ def load_align_rows(
 
 
 def sample_key(row: Row) -> SampleKey:
-    """``(cluster_id, dash-less method, mobile_cif)`` -- identifies one prediction sample."""
+    """``(cluster_id, method, mobile_cif)`` -- identifies one prediction sample."""
     return (
         row["cluster_id"],
-        row.get("_method") or normalize_method(row.get("prediction_method")),
+        row.get("prediction_method", ""),
         row.get("mobile_cif", ""),
     )
 
@@ -152,7 +141,7 @@ def cluster_expected_confs(
         conf = r.get("reference_conformation")
         if not conf:
             continue
-        m = r.get("_method") or normalize_method(r.get("prediction_method"))
+        m = r.get("prediction_method")
         out[(r["cluster_id"], m)].add(conf)
     return out
 

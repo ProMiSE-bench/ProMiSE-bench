@@ -29,6 +29,7 @@ dependencies = [
 
 [project.scripts]
 promise_data = "curation.run:promise_data"
+promise_eval = "eval.run:promise_eval"
 
 [tool.setuptools.packages.find]
 where = ["src"]

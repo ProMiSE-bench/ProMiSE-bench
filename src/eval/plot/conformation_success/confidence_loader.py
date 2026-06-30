@@ -37,7 +37,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from ._common import METHODS_WITH_CONFIDENCE, normalize_method
+from ._common import METHODS_WITH_CONFIDENCE
 
 
 def _read_json_key(path: Path, key: str) -> Optional[float]:
@@ -102,14 +102,14 @@ def clear_caches() -> None:
 def get_confidence_score(method: str, mobile_cif: Optional[str]) -> Optional[float]:
     """Return the confidence/ranking score for one prediction sample.
 
-    ``method`` should already be dash-less (``"boltz1"``, ``"boltz2"``,
-    ``"chai"`` etc.) or any value accepted by ``normalize_method``.
+    ``method`` must be one of ``METHODS_WITH_CONFIDENCE`` (``"boltz1"``,
+    ``"boltz2"``, ``"chai"``, ``"af3"``).
     Returns ``None`` if the score cannot be resolved (bioemu, missing
     files, parse errors).
     """
     if mobile_cif is None:
         return None
-    m = normalize_method(method)
+    m = method
     if m not in METHODS_WITH_CONFIDENCE:
         return None
 
@@ -224,7 +224,7 @@ def _cli() -> None:
     from .align_loader import load_align_rows
 
     align_dir = E.align_results_dir(args.align_dir)
-    method = normalize_method(args.method)
+    method = args.method
     rows = load_align_rows(
         align_dir,
         cluster_filter=[args.cluster],

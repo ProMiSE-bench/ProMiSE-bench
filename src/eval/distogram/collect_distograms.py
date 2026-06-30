@@ -93,24 +93,19 @@ def load_patterns_from_distogram_json(json_path: Path) -> list[str]:
     return sorted(patterns)
 
 
-# Method-name tokens accepted in distogram pattern strings (dash/underscore variants).
-_METHOD_TOKENS: dict[str, tuple[str, ...]] = {
-    "boltz1": ("boltz1", "boltz-1", "boltz_1"),
-    "boltz2": ("boltz2", "boltz-2", "boltz_2"),
-    "af3": ("af3",),
-    "bioemu": ("bioemu",),
-}
+# Method names used in distogram pattern strings.
+_DISTOGRAM_METHODS: Tuple[str, ...] = ("af3", "boltz1", "boltz2", "bioemu")
 
 
 def _pattern_matches_method(pat: str, method: str) -> bool:
-    """True iff ``pat`` unambiguously identifies ``method`` (boltz1/boltz2 must not collide)."""
+    """True iff ``pat`` identifies ``method`` (boltz1/boltz2 must not collide)."""
     p = pat.lower()
-    aliases = _METHOD_TOKENS.get(method, (method.lower(),))
-    if not any(tok in p for tok in aliases):
+    needle = f"/{method.lower()}/"
+    if needle not in p:
         return False
-    if method == "boltz1" and any(tok in p for tok in _METHOD_TOKENS["boltz2"]):
+    if method == "boltz1" and "/boltz2/" in p:
         return False
-    if method == "boltz2" and any(tok in p for tok in _METHOD_TOKENS["boltz1"]):
+    if method == "boltz2" and "/boltz1/" in p:
         return False
     return True
 
@@ -318,14 +313,6 @@ def extract_chain_seq_mapping_from_boltz_npz(
     return result
 
 
-# ``intrinsic`` (pipeline) <-> ``apo-monomers`` (legacy JSON) alias table.
-_AF3_METHOD_TYPE_ALIASES: dict[str, tuple[str, ...]] = {
-    "intrinsic": ("intrinsic", "apo-monomers", "ligand-induced", "protein-induced"),
-    "ligand-induced": ("ligand-induced", "intrinsic", "apo-monomers", "protein-induced"),
-    "protein-induced": ("protein-induced", "intrinsic", "apo-monomers", "ligand-induced"),
-}
-
-
 @functools.lru_cache(maxsize=8)
 def _load_af3_chain_mapping_json(path_str: str) -> dict:
     """Load + cache the consolidated AF3 chain-mapping JSON.
@@ -345,8 +332,7 @@ def _load_af3_chain_mapping_json(path_str: str) -> dict:
 
 
 def _candidate_af3_keys(method_type: str, cluster_id: str, yaml_tag: str) -> list[str]:
-    """JSON keys to probe; handles method-type aliasing and ``_m`` <-> ``_x`` toggle."""
-    method_aliases = _AF3_METHOD_TYPE_ALIASES.get(method_type, (method_type,))
+    """JSON keys to probe; handles ``_m`` <-> ``_x`` yaml tag toggle."""
     yaml_variants = [yaml_tag]
     if yaml_tag.endswith("_x"):
         yaml_variants.append(yaml_tag[:-2] + "_m")
@@ -354,12 +340,11 @@ def _candidate_af3_keys(method_type: str, cluster_id: str, yaml_tag: str) -> lis
         yaml_variants.append(yaml_tag[:-2] + "_x")
     keys: list[str] = []
     seen: set[str] = set()
-    for mt in method_aliases:
-        for yt in yaml_variants:
-            k = f"{mt}/{cluster_id}/{yt}"
-            if k not in seen:
-                seen.add(k)
-                keys.append(k)
+    for yt in yaml_variants:
+        k = f"{method_type}/{cluster_id}/{yt}"
+        if k not in seen:
+            seen.add(k)
+            keys.append(k)
     return keys
 
 
@@ -514,6 +499,64 @@ def extract_af3_chain_mapping(
             print(f"  Warning: Failed to read distogram: {e}")
 
     return result
+
+
+def _chain_id_from_yaml_stem(yaml_stem: str) -> str:
+    parts = yaml_stem.split("_")
+    return parts[2] if len(parts) >= 3 else "A"
+
+
+def _monomer_chain_mapping_from_distogram_npz(
+    distogram_path: Path, chain_id: str
+) -> dict:
+    """Minimal polymer chain mapping when Boltz processed NPZ is unavailable."""
+    data = np.load(distogram_path)
+    disto = data["distogram"]
+    size = int(disto.shape[1])
+    return {
+        "chains": {
+            chain_id: {
+                "start": 0,
+                "end": size - 1,
+                "length": size,
+                "mol_type": "polymer",
+            }
+        },
+        "total_length": size,
+        "distogram_size": size,
+        "size_match": True,
+    }
+
+
+def _find_boltz_prediction_cif(distogram_npz: Path) -> Optional[Path]:
+    """Return a Boltz prediction CIF next to the distogram NPZ (same as struct alignment)."""
+    parent = distogram_npz.parent
+    stem = distogram_npz.name.replace("_distogram.npz", "")
+    named = parent / f"{stem}_model_0.cif"
+    if named.exists():
+        return named
+    candidates = sorted(parent.glob("*_model_*.cif"))
+    return candidates[0] if candidates else None
+
+
+def _chain_seq_mapping_from_prediction_cif(
+    distogram_npz: Path,
+) -> Optional[dict]:
+    """
+    Build chain -> distogram index ranges from the prediction CIF.
+
+    Matches struct ConfBench: ``mobile_chain`` / ``target_chain`` are CIF
+    ``label_asym_id`` values (e.g. oligomer swap A1/B1), not yaml entity ids.
+    """
+    cif_path = _find_boltz_prediction_cif(distogram_npz)
+    if cif_path is None:
+        return None
+    mapping = extract_chain_seq_mapping(cif_path, distogram_npz)
+    if not mapping.get("chains"):
+        return None
+    for info in mapping["chains"].values():
+        info.setdefault("mol_type", "polymer")
+    return mapping
 
 
 def extract_chain_seq_mapping(cif_path: Path, distogram_path: Optional[Path] = None) -> dict:
@@ -752,6 +795,28 @@ def collect_boltz_distograms(output_base: Path, force: bool = False, patterns: l
                 )
                 print(f"  Warning: {msg}")
                 errors.append({"type": "MissingProcessedNPZ", "yaml_stem": yaml_stem, "method": boltz1_or_2, "method_type": set_name, "cluster": cluster, "distogram": str(npz)})
+                try:
+                    chain_mapping = _chain_seq_mapping_from_prediction_cif(npz)
+                    if not chain_mapping:
+                        chain_id = _chain_id_from_yaml_stem(yaml_stem)
+                        chain_mapping = _monomer_chain_mapping_from_distogram_npz(
+                            npz, chain_id
+                        )
+                    with open(mapping_file, "w") as f:
+                        json.dump(chain_mapping, f, indent=2)
+                    mappings_created += 1
+                except Exception as e:
+                    print(
+                        f"  Warning: Failed distogram-only chain mapping for {yaml_stem}: {e}"
+                    )
+                    errors.append(
+                        {
+                            "type": "DistogramOnlyMappingError",
+                            "yaml_stem": yaml_stem,
+                            "distogram": str(npz),
+                            "message": str(e),
+                        }
+                    )
             else:
                 try:
                     chain_mapping = extract_chain_seq_mapping_from_boltz_npz(processed_npz, npz)
@@ -1035,7 +1100,7 @@ def collect_bioemu_distograms(output_base: Path, force: bool = False, patterns: 
         # Try to load distogram_analysis_data to find the correct method_type
         # This is a bit of a hack, but necessary since bioemu doesn't have method_type in path
         # We'll try each method_type until we find one that works
-        for trial_type in ["apo-monomers", "ligand-induced", "protein-induced"]:
+        for trial_type in ["intrinsic", "ligand-induced", "protein-induced"]:
             target_dir = output_dir / trial_type / cluster_id
             if target_dir.parent.parent.exists():
                 # Found a valid parent, assume this is correct
@@ -1047,8 +1112,7 @@ def collect_bioemu_distograms(output_base: Path, force: bool = False, patterns: 
                 break
         
         if not method_type:
-            # Default to apo-monomers if can't determine
-            method_type = "apo-monomers"
+            method_type = "intrinsic"
             yaml_tag = cluster_id
         
         # Create target filename: sample_{model}.npz
@@ -1120,24 +1184,19 @@ def collect_bioemu_distograms(output_base: Path, force: bool = False, patterns: 
 
 
 
-# Answer-map -> on-disk name translation for ``generate_distogram_tasks``.
-# Answer-map uses dashed methods (``boltz-1``); on-disk tree uses dash-less.
-_DISTOGRAM_METHODS: Tuple[str, ...] = ("af3", "boltz-1", "boltz-2", "bioemu")
-_DASH_TO_DISK_METHOD: Dict[str, str] = {"boltz-1": "boltz1", "boltz-2": "boltz2"}
-# bioemu-only set alias: pipeline ``intrinsic`` -> on-disk ``apo-monomers``.
-_BIOEMU_SET_ALIASES: Dict[str, str] = {"intrinsic": "apo-monomers"}
-
-
-def _disk_method(method: str) -> str:
-    """Translate answer-map method key -> on-disk directory name."""
-    return _DASH_TO_DISK_METHOD.get(method, method)
-
-
-def _disk_set(method: str, set_name: str) -> str:
-    """Translate answer-map set key -> on-disk directory name (bioemu only)."""
-    if method == "bioemu":
-        return _BIOEMU_SET_ALIASES.get(set_name, set_name)
-    return set_name
+def _iter_apo_method_infos(apo_predictions: dict):
+    """Yield ``(method, method_info)`` from flat or tag-nested ``apo_predictions``."""
+    if not apo_predictions:
+        return
+    sample = next(iter(apo_predictions.values()), None)
+    if isinstance(sample, dict) and ("pattern" in sample or "yaml_tag" in sample):
+        yield from apo_predictions.items()
+        return
+    for _tag, methods in apo_predictions.items():
+        if not isinstance(methods, dict):
+            continue
+        for method, method_info in methods.items():
+            yield method, method_info
 
 
 def generate_distogram_tasks(
@@ -1193,7 +1252,9 @@ def generate_distogram_tasks(
 
             # Process apo predictions
             if "apo_predictions" in cluster_data:
-                for method, method_info in cluster_data["apo_predictions"].items():
+                for method, method_info in _iter_apo_method_infos(
+                    cluster_data["apo_predictions"]
+                ):
                     if method not in _DISTOGRAM_METHODS:
                         continue
                     if method_filter and method != method_filter:
@@ -1202,37 +1263,24 @@ def generate_distogram_tasks(
                     if not yaml_tag and method != "bioemu":
                         continue
 
-                    # Answer-map keys -> on-disk path segments.
-                    disk_m = _disk_method(method)
-                    disk_s = _disk_set(method, method_type)
-
                     # Pattern: {output_base}/{method}/{set}/{cluster}/{yaml}/seed_*.npz
                     distogram_pattern = (
-                        output_base / disk_m / disk_s / cluster_id / yaml_tag / "seed_*.npz"
+                        output_base / method / method_type / cluster_id / yaml_tag / "seed_*.npz"
                     )
                     if method == "bioemu":
                         distogram_pattern = (
-                            output_base / disk_m / disk_s / cluster_id / "seed_*.npz"
+                            output_base / method / method_type / cluster_id / "seed_*.npz"
                         )
                     distogram_files = sorted(glob.glob(str(distogram_pattern)))
                     chain_mapping_pattern = (
-                        output_base / disk_m / disk_s / cluster_id / yaml_tag / "chain_seq_mapping.json"
+                        output_base / method / method_type / cluster_id / yaml_tag / "chain_seq_mapping.json"
                     )
                     if method == "bioemu":
                         chain_mapping_pattern = (
-                            output_base / disk_m / disk_s / cluster_id / "chain_seq_mapping.json"
+                            output_base / method / method_type / cluster_id / "chain_seq_mapping.json"
                         )
-                    method_type_ori = method_type
-                    if not distogram_files and method_type_ori == "apo-monomers":
-                        distogram_pattern = output_base / disk_m / "protein-induced" / cluster_id / yaml_tag / "seed_*.npz"
-                        distogram_files = sorted(glob.glob(str(distogram_pattern)))
-                        chain_mapping_pattern = output_base / disk_m / "protein-induced" / cluster_id / yaml_tag / "chain_seq_mapping.json"
-                    if not distogram_files and method_type_ori == "apo-monomers":
-                        distogram_pattern = output_base / disk_m / "ligand-induced" / cluster_id / yaml_tag / "seed_*.npz"
-                        distogram_files = sorted(glob.glob(str(distogram_pattern)))
-                        chain_mapping_pattern = output_base / disk_m / "ligand-induced" / cluster_id / yaml_tag / "chain_seq_mapping.json"
                     if not distogram_files:
-                        print(f"    No distogram files found for {output_base}/{disk_m}/{disk_s}/{cluster_id}/{yaml_tag}")
+                        print(f"    No distogram files found for {output_base}/{method}/{method_type}/{cluster_id}/{yaml_tag}")
                         continue
 
                     chain_mapping_files = list(glob.glob(str(chain_mapping_pattern)))
@@ -1267,8 +1315,7 @@ def generate_distogram_tasks(
                             return "conf_x"
                         return "unknown"
 
-                    # Dash-less on-disk label for downstream consumers.
-                    prediction_method = _disk_method(method)
+                    prediction_method = method
 
                     for ref_yaml_tag, ref_info in all_references.items():
                         # Reference state
@@ -1332,23 +1379,19 @@ def generate_distogram_tasks(
                         if not yaml_tag:
                             continue
 
-                        # Answer-map keys -> on-disk segments (see apo branch).
-                        disk_m = _disk_method(method)
-                        disk_s = _disk_set(method, method_type)
-
                         # Find all distogram files for this yaml_tag
                         distogram_pattern = (
-                            output_base / disk_m / disk_s / cluster_id / yaml_tag / "seed_*.npz"
+                            output_base / method / method_type / cluster_id / yaml_tag / "seed_*.npz"
                         )
 
 
                         distogram_files = list(glob.glob(str(distogram_pattern)))
 
                         if not distogram_files:
-                            print(f"    No distogram files found for {disk_m}/{disk_s}/{cluster_id}/{yaml_tag}")
+                            print(f"    No distogram files found for {method}/{method_type}/{cluster_id}/{yaml_tag}")
                             continue
                         distogram_chain_mapping_pattern = (
-                                                        output_base / disk_m / disk_s / cluster_id / yaml_tag / "chain_seq_mapping.json"
+                            output_base / method / method_type / cluster_id / yaml_tag / "chain_seq_mapping.json"
                         )
                         chain_mapping_files = list(glob.glob(str(distogram_chain_mapping_pattern)))
                         assert len(chain_mapping_files) == 1, f"Multiple chain_seq_mapping.json files found for {distogram_chain_mapping_pattern}"
@@ -1402,7 +1445,7 @@ def generate_distogram_tasks(
                                 except Exception:
                                     mobile_cif_path = ""
 
-                            prediction_method = _disk_method(method)
+                            prediction_method = method
 
                             mobile_chain = method_info.get("target_chain", "")
                             ref_chain = ref_info.get("target_chain", "")
@@ -1552,6 +1595,11 @@ def main():
         default=None,
         help="Output path for distogram tasks JSON (default: {output_dir}/distogram_tasks.json)",
     )
+    parser.add_argument(
+        "--allow-mapping-errors",
+        action="store_true",
+        help="Do not exit 1 when chain-mapping extraction had warnings (symlinks still written)",
+    )
     args = parser.parse_args()
 
     output_base = E.distogram_collect_output_dir(args.output_dir)
@@ -1621,11 +1669,14 @@ def main():
             print(f"Saved combined {len(all_errors)} mapping errors to {err_all_path}")
         except Exception as e:
             print(f"Warning: Failed to save combined errors to {err_all_path}: {e}")
-        # Exit non-zero to signal failure
-        import sys
+        if not args.allow_mapping_errors:
+            import sys
 
-        print("Errors encountered during mapping extraction. Exiting with status 1.")
-        sys.exit(1)
+            print("Errors encountered during mapping extraction. Exiting with status 1.")
+            sys.exit(1)
+        print(
+            f"Warning: {len(all_errors)} mapping issues (--allow-mapping-errors; continuing)"
+        )
 
     if not args.all and not args.method:
         parser.print_help()

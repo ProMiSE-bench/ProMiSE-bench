@@ -9,9 +9,8 @@ machine-readable form so other figures can be added incrementally.
 
 Inputs
 ------
-``pair_level_results.json`` produced by ``pair_results.py``. Promise-bench
-labels the apo set as ``intrinsic`` (the legacy script used
-``apo-monomers``).
+``pair_level_results.json`` produced by ``pair_results.py``. Set types are
+``intrinsic``, ``ligand-induced``, and ``protein-induced``.
 
 Outputs
 -------
