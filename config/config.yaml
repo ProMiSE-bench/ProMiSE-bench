@@ -121,9 +121,9 @@ eval:
     msa_pref_csv: per_pair_summary.csv
     msa_bias_csv: msa/msa_bias_results.csv
 
-    # merged outputs
-    merged_json: merged_valid_pairs_data.json
-    merged_csv: merged_valid_pairs_data.csv
+    # per-pair bias / ConfBench aggregate (canonical release file under data/)
+    bias_score: ../data/bias_score.json
+    bias_score_csv: ../data/bias_score.csv
 
     # training bias per-model outputs
     training_bias_af3: train/training_bias/training_bias_per_pair_af3.json
